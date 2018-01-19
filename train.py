@@ -38,12 +38,13 @@ from keras.applications import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
-parser.add_argument('-b', '--batch-size', type=int, default=4, help='Batch Size during training, e.g. -b 2')
+parser.add_argument('-b', '--batch-size', type=int, default=64, help='Batch Size during training, e.g. -b 2')
+parser.add_argument('-s', '--sub-batch-size', type=int, default=4, help='Number of crops from same image for each batch')
 parser.add_argument('-ba', '--batch-acc', type=int, default=1, help='Batch Size for training accumulation, e.g. -b 4')
-parser.add_argument('-l', '--learning_rate', type=float, default=1e-2, help='Initial learning rate')
+parser.add_argument('-l', '--learning_rate', type=float, default=1e-3, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
-parser.add_argument('-p', '--patchsize', type=int, default=512, help='Patch size')
+parser.add_argument('-p', '--patchsize', type=int, default=299, help='Patch size')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
 parser.add_argument('-pp','--preprocessed_input_path', type=str, default='images_preprocessed.hkl', help='Path to preprocessed images')
 args = parser.parse_args()
@@ -72,6 +73,7 @@ def gen(items, batch_size, training=True, inference=False):
   images_cached = {}
 
   X = np.zeros((batch_size, PATCH_SIZE, PATCH_SIZE, 3), dtype=np.float32)
+  O = np.zeros((batch_size, 2), dtype=np.float32)
 
   if not inference:
     y = np.zeros((batch_size), dtype=np.float32)
@@ -94,11 +96,10 @@ def gen(items, batch_size, training=True, inference=False):
         class_name = item.split('/')[-2]
         assert class_name in CLASSES
         class_idx = CLASSES.index(class_name)
-        y[batch_idx] = class_idx # to_categorical(class_idx, num_classes = N_CLASSES)
 
       if item not in images_cached:
 
-        img = load_img(item)#[:PATCH_SIZE,:PATCH_SIZE]
+        img = load_img(item)
 
         #img = skimage.transform.resize(img, (PATCH_SIZE, PATCH_SIZE), mode='reflect').astype(np.float32) / 127.5 - 1.
         #img = img.astype(np.float32) / 127.5 - 1.
@@ -118,25 +119,40 @@ def gen(items, batch_size, training=True, inference=False):
 
         img = images_cached[item]
 
-      sx= random.randint(0, img.shape[1] - PATCH_SIZE)
-      sy= random.randint(0, img.shape[0] - PATCH_SIZE)
+      sub_batch_size = args.sub_batch_size
 
-      _img = img[sy:sy+PATCH_SIZE, sx:sx+PATCH_SIZE]
-      _img = inception_v3.preprocess_input(_img.astype(np.float32))
+      assert batch_size % sub_batch_size == 0
 
-      X[batch_idx] = _img
+      for sub_batch in range(sub_batch_size):
+        sx= random.randint(0, img.shape[1] - PATCH_SIZE)
+        sy= random.randint(0, img.shape[0] - PATCH_SIZE)
+
+        _img = img[sy:sy+PATCH_SIZE, sx:sx+PATCH_SIZE]
+        _img = inception_v3.preprocess_input(_img.astype(np.float32))
+
+        X[batch_idx+sub_batch] = _img
+        O[batch_idx+sub_batch] = np.float32([(sx/(img.shape[1] - PATCH_SIZE)), (sy/(img.shape[0] - PATCH_SIZE))])
+        y[batch_idx+sub_batch] = class_idx # to_categorical(class_idx, num_classes = N_CLASSES)
 
       if batch_idx == 0 and False:
         show_image(X[batch_idx])
 
-      batch_idx += 1
+      batch_idx += sub_batch_size
 
       if batch_idx == batch_size:
 
         if not inference:
-          yield(X, y)
+          #I_O_zipped = list(zip(X, O, y))
+          #random.shuffle(I_O_zipped)
+          #X[:], O[:], y[:] = zip(*I_O_zipped)
+          yield([X, O], [y])
+        
         else:   
-          yield(X)
+          I_O_zipped = list(zip(X, O))
+          random.shuffle(I_O_zipped)
+          X[:], O[:] = zip(*I_O_zipped)
+
+          yield([X, O])
 
         batch_idx = 0
 
@@ -189,6 +205,7 @@ else:
   last_epoch = 0
 
   input_image = Input(shape=(PATCH_SIZE, PATCH_SIZE, 3))
+  crop_zone   = Input(shape=(2,))
   image_filtered = input_image #KernelFilter(input_shape=(PATCH_SIZE, PATCH_SIZE, 3))(input_image)
 
   classifier_model = InceptionV3(
@@ -198,9 +215,10 @@ else:
     pooling='avg', classes=N_CLASSES)
 
   x = classifier_model(image_filtered)
+  x = concatenate([x,crop_zone])
   prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
-  model = Model(inputs=input_image, outputs=prediction)
+  model = Model(inputs=(input_image,crop_zone), outputs=prediction)
 
   model.summary()
 
