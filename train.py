@@ -14,7 +14,7 @@ from keras.losses import binary_crossentropy
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, LambdaCallback
 from keras.preprocessing.image import ImageDataGenerator
 from keras.models import load_model, Model
-from keras.layers import concatenate, Lambda, Input, Dense
+from keras.layers import concatenate, Lambda, Input, Dense, Dropout, Flatten
 from keras.utils import to_categorical
 from keras.initializers import Constant
 from multi_gpu_keras import multi_gpu_model
@@ -33,6 +33,7 @@ from tqdm import tqdm
 import jpeg4py as jpeg
 from scipy import signal
 import cv2
+import math
 
 from keras.applications import *
 
@@ -100,8 +101,7 @@ def gen(items, batch_size, training=True, inference=False):
       if item not in images_cached:
 
         img = load_img(item)
-
-        #img = skimage.transform.resize(img, (PATCH_SIZE, PATCH_SIZE), mode='reflect').astype(np.float32) / 127.5 - 1.
+        img = skimage.transform.resize(img, (512, 512), mode='reflect') #/ 127.5 - 1.
         #img = img.astype(np.float32) / 127.5 - 1.
 
         kernel_filter = 1/12. * np.array([\
@@ -113,7 +113,7 @@ def gen(items, batch_size, training=True, inference=False):
 
         #img = cv2.filter2D(img,-1,kernel_filter)
 
-        #images_cached[item] = img
+        images_cached[item] = img
 
       else:
 
@@ -131,7 +131,7 @@ def gen(items, batch_size, training=True, inference=False):
         _img = inception_v3.preprocess_input(_img.astype(np.float32))
 
         X[batch_idx+sub_batch] = _img
-        O[batch_idx+sub_batch] = np.float32([(sx/(img.shape[1] - PATCH_SIZE)), (sy/(img.shape[0] - PATCH_SIZE))])
+        O[batch_idx+sub_batch] = np.float32([(sx/(img.shape[1] - PATCH_SIZE)), (sy/(img.shape[0] - PATCH_SIZE))]) - np.float32([0.5,0.5])
         y[batch_idx+sub_batch] = class_idx # to_categorical(class_idx, num_classes = N_CLASSES)
 
       if batch_idx == 0 and False:
@@ -212,9 +212,11 @@ else:
     include_top=False, 
     weights = 'imagenet', 
     input_shape=(PATCH_SIZE, PATCH_SIZE, 3), 
-    pooling='avg', classes=N_CLASSES)
+    pooling=None, classes=N_CLASSES)
 
   x = classifier_model(image_filtered)
+  x = Flatten()(x)
+  x = Dropout(0.5)(x)
   x = concatenate([x,crop_zone])
   prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
@@ -250,9 +252,9 @@ if True:
 
   model.fit_generator(
       generator        = gen(ids_train, args.batch_size),
-      steps_per_epoch  = len(ids_train)  // args.batch_size,
+      steps_per_epoch  = int(math.ceil(len(ids_train)  // args.batch_size)),
       validation_data  = gen(ids_val, args.batch_size, training = False),
-      validation_steps = len(ids_val) // args.batch_size,
+      validation_steps = int(math.ceil(len(ids_val) // args.batch_size)),
       epochs = args.max_epoch,
       callbacks = [save_checkpoint, reduce_lr],
       initial_epoch = last_epoch)
