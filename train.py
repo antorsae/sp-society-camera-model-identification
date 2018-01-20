@@ -77,6 +77,69 @@ CLASSES = [
 N_CLASSES = len(CLASSES)
 load_img   = lambda img_path: jpeg.JPEG(img_path).decode()
 
+from PIL import Image
+from io import BytesIO
+
+def random_manipulation(img):
+
+  manipulation = random.choice(['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2'])
+
+  if manipulation.startswith('jpg'):
+    out = BytesIO()
+    im = Image.fromarray(img)
+    im.save(out, format='jpeg', quality=70 if manipulation=='jpeg70' else 90)
+    im_decoded = jpeg.JPEG(np.frombuffer(out.getvalue(), dtype=np.uint8)).decode()
+    del out
+    del im
+  elif manipulation.startswith('gamma'):
+    gamma = 0.8 if manipulation == 'gamma0.8' else 1.2
+    img = img/255.0
+    img = cv2.pow(img, gamma)
+    im_decoded = np.uint8(img*255)
+  return im_decoded
+
+def preprocess_image(img):
+    # find `preprocess_input` function specific to the classifier
+  classifier_to_module = { 
+    'NASNetLarge'       : 'nasnet',
+    'NASNetMobile'      : 'nasnet',
+    'DenseNet121'       : 'densenet',
+    'DenseNet161'       : 'densenet',
+    'DenseNet201'       : 'densenet',
+    'InceptionResNetV2' : 'inception_resnet_v2',
+    'InceptionV3'       : 'inception_v3',
+    'MobileNet'         : 'mobilenet',
+    'ResNet50'          : 'resnet50',
+    'VGG16'             : 'vgg16',
+    'VGG19'             : 'vgg19',
+    'Xception'          : 'xception',
+  }
+
+  classifier_module_name = classifier_to_module[args.classifier]
+  preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
+  return preprocess_input_function(img.astype(np.float32))
+
+def get_size(obj, seen=None):
+    """Recursively finds size of objects"""
+    size = sys.getsizeof(obj)
+    if seen is None:
+        seen = set()
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    # Important mark as seen *before* entering recursion to gracefully handle
+    # self-referential objects
+    seen.add(obj_id)
+    if isinstance(obj, dict):
+        size += sum([get_size(v, seen) for v in obj.values()])
+        size += sum([get_size(k, seen) for k in obj.keys()])
+    elif hasattr(obj, '__dict__'):
+        size += get_size(obj.__dict__, seen)
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
+        size += sum([get_size(i, seen) for i in obj])
+    return size
+
+
 def gen(items, batch_size, training=True, inference=False):
 
   images_cached = {}
@@ -115,45 +178,12 @@ def gen(items, batch_size, training=True, inference=False):
         # resize image so it's same as test images
         center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
         half_crop = 512//2
-        img = img[center_y -half_crop : center_y + half_crop, center_x - half_crop : center_x + half_crop]
-
-        if args.kernel_filter:
-          # see slide 13
-          # http://www.lirmm.fr/~chaumont/publications/WIFS-2016_TUAMA_COMBY_CHAUMONT_Camera_Model_Identification_With_CNN_slides.pdf
-          kernel_filter = 1/12. * np.array([\
-            [-1,  2,  -2,  2, -1],  \
-            [ 2, -6,   8, -6,  2],  \
-            [-2,  8, -12,  8, -2],  \
-            [ 2, -6,   8, -6,  2],  \
-            [-1,  2,  -2,  2, -1]]) 
-
-          img = cv2.filter2D(img.astype(np.float32),-1,kernel_filter)
-          # kernel filter already puts mean ~0 and roughly scales between [-1..1]
-          # no need to preprocess_input further
-        else:
-          
-          # find `preprocess_input` function specific to the classifier
-          classifier_to_module = { 
-            'NASNetLarge'       : 'nasnet',
-            'NASNetMobile'      : 'nasnet',
-            'DenseNet121'       : 'densenet',
-            'DenseNet161'       : 'densenet',
-            'DenseNet201'       : 'densenet',
-            'InceptionResNetV2' : 'inception_resnet_v2',
-            'InceptionV3'       : 'inception_v3',
-            'MobileNet'         : 'mobilenet',
-            'ResNet50'          : 'resnet50',
-            'VGG16'             : 'vgg16',
-            'VGG19'             : 'vgg19',
-            'Xception'          : 'xception',
-          }
-
-          classifier_module_name = classifier_to_module[args.classifier]
-          preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
-          img = preprocess_input_function(img.astype(np.float32))
+        img = np.array(img[center_y -half_crop : center_y + half_crop, center_x - half_crop : center_x + half_crop])
 
         # store it in a dict for later (greatly accelerates subsequent epochs)
         images_cached[item] = img
+        #size = get_size(images_cached)
+        #print(size / (1024. * 1024. * 1024.))
 
       else:
         img = images_cached[item]
@@ -162,6 +192,25 @@ def gen(items, batch_size, training=True, inference=False):
       # does not really matter images have been cached on images_cached dict.
       sub_batch_size = args.sub_batch_size
       assert batch_size % sub_batch_size == 0
+
+      if training and np.random.rand() < 0.5:
+        img = random_manipulation(img)
+
+      if args.kernel_filter:
+        # see slide 13
+        # http://www.lirmm.fr/~chaumont/publications/WIFS-2016_TUAMA_COMBY_CHAUMONT_Camera_Model_Identification_With_CNN_slides.pdf
+        kernel_filter = 1/12. * np.array([\
+          [-1,  2,  -2,  2, -1],  \
+          [ 2, -6,   8, -6,  2],  \
+          [-2,  8, -12,  8, -2],  \
+          [ 2, -6,   8, -6,  2],  \
+          [-1,  2,  -2,  2, -1]]) 
+
+        img = cv2.filter2D(img.astype(np.float32),-1,kernel_filter)
+        # kernel filter already puts mean ~0 and roughly scales between [-1..1]
+        # no need to preprocess_input further
+      else:
+        img = preprocess_image(img)
 
       for sub_batch in range(sub_batch_size):
 
@@ -389,7 +438,7 @@ if True:
       validation_steps = int(math.ceil(len(ids_val) // args.batch_size)),
       epochs = args.max_epoch,
       callbacks = [save_checkpoint, reduce_lr],
-      initial_epoch = last_epoch, )
+      initial_epoch = last_epoch)
       #use_multiprocessing=True, 
       #workers=31,
       #max_queue_size=16)
