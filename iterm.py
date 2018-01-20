@@ -6,6 +6,7 @@ import numpngw
 import numpy as np
 
 def show_image(a):
+    # if not uint8 we assume mean = 0 and ranges from [-1..1]
     if a.dtype != np.uint8:
         a += 1.
         a *= 127.5
