@@ -52,6 +52,7 @@ parser.add_argument('-pp','--preprocessed_input_path', type=str, default='images
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
+parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
 
 args = parser.parse_args()
 
@@ -111,9 +112,8 @@ def gen(items, batch_size, training=True, inference=False):
         img = load_img(item)
 
         # resize image so it's same as test images
-        img = skimage.transform.resize(img, (512, 512), mode='reflect') #/ 127.5 - 1.
+        img = skimage.transform.resize(img, (512, 512), mode='reflect')
 
-        
         if args.kernel_filter:
           # see slide 13
           # http://www.lirmm.fr/~chaumont/publications/WIFS-2016_TUAMA_COMBY_CHAUMONT_Camera_Model_Identification_With_CNN_slides.pdf
@@ -124,22 +124,32 @@ def gen(items, batch_size, training=True, inference=False):
             [ 2, -6,   8, -6,  2],  \
             [-1,  2,  -2,  2, -1]]) 
 
-          
           img = cv2.filter2D(img.astype(np.float32),-1,kernel_filter)
-          # kernel filter already puts mean ~0 and roughly scales between -1..1
+          # kernel filter already puts mean ~0 and roughly scales between [-1..1]
           # no need to preprocess_input further
         else:
           
           # find `preprocess_input` function specific to the classifier
-          # will need to finetune b/c Keras naming is not fully consistent
-          # e.g. 
-          # ResNet50    (function) -> resnet50 (module) OK
-          # InceptionV3 (function) -> inception_v3 (module) NOT OK
+          classifier_to_module = { 
+            'NASNetLarge'       : 'nasnet',
+            'NASNetMobile'      : 'nasnet',
+            'DenseNet121'       : 'densenet',
+            'DenseNet161'       : 'densenet',
+            'DenseNet201'       : 'densenet',
+            'InceptionResNetV2' : 'inception_resnet_v2',
+            'InceptionV3'       : 'inception_v3',
+            'MobileNet'         : 'mobilenet',
+            'ResNet50'          : 'resnet50',
+            'VGG16'             : 'vgg16',
+            'VGG19'             : 'vgg19',
+            'Xception'          : 'xception',
+          }
 
-          classifier_module_name = args.classifier.lower().replace('_', '')
+          classifier_module_name = classifier_to_module[args.classifier]
           preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
           img = preprocess_input_function(img.astype(np.float32))
 
+        # store it in a dict for later (greatly accelerates subsequent epochs)
         images_cached[item] = img
 
       else:
@@ -175,7 +185,7 @@ def gen(items, batch_size, training=True, inference=False):
 
         if not inference:
           # commented b/c converges slower... why???
-          
+
           #I_O_zipped = list(zip(X, O, y))
           #random.shuffle(I_O_zipped)
           #X[:], O[:], y[:] = zip(*I_O_zipped)
@@ -209,7 +219,7 @@ class KernelFilter(Layer):
 
         self.kernel = self.add_weight(
           name='kernel',
-          shape=(5,5,3,3),
+          shape=(5,5,3,3), # need to check this!
           initializer=self.kernel_initializer,
           trainable=False)
 
@@ -241,9 +251,9 @@ else:
 
   classifier_model = classifier(
     include_top=False, 
-    weights = None, #'imagenet', 
+    weights = 'imagenet' if args.use_imagenet_weights else None,
     input_shape=(CROP_SIZE, CROP_SIZE, 3), 
-    pooling=args.pooling if args.pooling != 'none' else None, classes=N_CLASSES)
+    pooling=args.pooling if args.pooling != 'none' else None)
 
   x = classifier_model(image_filtered)
   if args.pooling == 'none':
@@ -265,8 +275,8 @@ ids.sort()
 
 ids_train, ids_val = train_test_split(ids, test_size=0.1, random_state=42)
 
-#opt = Adam(lr=args.learning_rate)
-opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
+opt = Adam(lr=args.learning_rate)
+#opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
 
 model.compile(optimizer=opt, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
