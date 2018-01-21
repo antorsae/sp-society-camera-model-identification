@@ -25,17 +25,20 @@ from keras.engine.topology import Layer
 import skimage
 import pickle
 from iterm import show_image
+from tqdm import tqdm
+from PIL import Image
+from io import BytesIO
 
 import itertools
 import re
 import os
 import sys
-import csv
 from tqdm import tqdm
 import jpeg4py as jpeg
 from scipy import signal
 import cv2
 import math
+import csv
 
 
 parser = argparse.ArgumentParser()
@@ -75,15 +78,15 @@ CLASSES = [
     'Samsung-Galaxy-Note3',
     'Sony-NEX-7']
 
+MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2']
+
 N_CLASSES = len(CLASSES)
-load_img   = lambda img_path: jpeg.JPEG(img_path).decode()
+load_img  = lambda img_path: jpeg.JPEG(img_path).decode()
 
-from PIL import Image
-from io import BytesIO
+def random_manipulation(img, manipulation=None):
 
-def random_manipulation(img):
-
-    manipulation = random.choice(['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2'])
+    if manipulation == None:
+        manipulation = random.choice(MANIPULATIONS)
 
     if manipulation.startswith('jpg'):
         out = BytesIO()
@@ -103,25 +106,41 @@ def random_manipulation(img):
     return im_decoded
 
 def preprocess_image(img):
-        # find `preprocess_input` function specific to the classifier
-    classifier_to_module = { 
-        'NASNetLarge'       : 'nasnet',
-        'NASNetMobile'      : 'nasnet',
-        'DenseNet121'       : 'densenet',
-        'DenseNet161'       : 'densenet',
-        'DenseNet201'       : 'densenet',
-        'InceptionResNetV2' : 'inception_resnet_v2',
-        'InceptionV3'       : 'inception_v3',
-        'MobileNet'         : 'mobilenet',
-        'ResNet50'          : 'resnet50',
-        'VGG16'             : 'vgg16',
-        'VGG19'             : 'vgg19',
-        'Xception'          : 'xception',
-    }
+    
+    if args.kernel_filter:
+        # see slide 13
+        # http://www.lirmm.fr/~chaumont/publications/WIFS-2016_TUAMA_COMBY_CHAUMONT_Camera_Model_Identification_With_CNN_slides.pdf
+        kernel_filter = 1/12. * np.array([\
+            [-1,  2,  -2,  2, -1],  \
+            [ 2, -6,   8, -6,  2],  \
+            [-2,  8, -12,  8, -2],  \
+            [ 2, -6,   8, -6,  2],  \
+            [-1,  2,  -2,  2, -1]]) 
 
-    classifier_module_name = classifier_to_module[args.classifier]
-    preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
-    return preprocess_input_function(img.astype(np.float32))
+        img = cv2.filter2D(img.astype(np.float32),-1,kernel_filter)
+        # kernel filter already puts mean ~0 and roughly scales between [-1..1]
+        # no need to preprocess_input further
+        return img
+    else:
+        # find `preprocess_input` function specific to the classifier
+        classifier_to_module = { 
+            'NASNetLarge'       : 'nasnet',
+            'NASNetMobile'      : 'nasnet',
+            'DenseNet121'       : 'densenet',
+            'DenseNet161'       : 'densenet',
+            'DenseNet201'       : 'densenet',
+            'InceptionResNetV2' : 'inception_resnet_v2',
+            'InceptionV3'       : 'inception_v3',
+            'MobileNet'         : 'mobilenet',
+            'ResNet50'          : 'resnet50',
+            'VGG16'             : 'vgg16',
+            'VGG19'             : 'vgg19',
+            'Xception'          : 'xception',
+        }
+
+        classifier_module_name = classifier_to_module[args.classifier]
+        preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
+        return preprocess_input_function(img.astype(np.float32))
 
 def get_size(obj, seen=None):
         """Recursively finds size of objects"""
@@ -142,7 +161,6 @@ def get_size(obj, seen=None):
         elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
                 size += sum([get_size(i, seen) for i in obj])
         return size
-
 
 def gen(items, batch_size, training=True, inference=False):
 
@@ -203,22 +221,7 @@ def gen(items, batch_size, training=True, inference=False):
                 img = random_manipulation(img)
                 manipulated = 1.
 
-            if args.kernel_filter:
-                # see slide 13
-                # http://www.lirmm.fr/~chaumont/publications/WIFS-2016_TUAMA_COMBY_CHAUMONT_Camera_Model_Identification_With_CNN_slides.pdf
-                kernel_filter = 1/12. * np.array([\
-                    [-1,  2,  -2,  2, -1],  \
-                    [ 2, -6,   8, -6,  2],  \
-                    [-2,  8, -12,  8, -2],  \
-                    [ 2, -6,   8, -6,  2],  \
-                    [-1,  2,  -2,  2, -1]]) 
-
-                img = cv2.filter2D(img.astype(np.float32),-1,kernel_filter)
-                # kernel filter already puts mean ~0 and roughly scales between [-1..1]
-                # no need to preprocess_input further
-                
-            else:
-                img = preprocess_image(img)
+            img = preprocess_image(img)
 
             for sub_batch in range(sub_batch_size):
 
@@ -384,10 +387,9 @@ if args.model:
     print("Loading model " + args.model)
 
     model = load_model(args.model, compile=False)
-    match = re.search(r'([a-z]+)-epoch(\d+)-.*\.hdf5', args.model)
+    match = re.search(r'([A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
     model_name = match.group(1)
     last_epoch = int(match.group(2)) + 1
-
 else:
     last_epoch = 0
 
@@ -408,45 +410,72 @@ else:
         x = Flatten()(x)
     x = Dropout(args.dropout)(x)
     x = concatenate([x,manipulated])
+    x = Dense(512, activation='relu')(x)
+    x = Dropout(args.dropout)(x)
+    x = Dense(128,  activation='relu')(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
 
     model.summary()
 
-    model_name = args.classifier + ('_kf' if args.kernel_filter else '') + '_do' + str(args.dropout)
+    model_name = args.classifier + ('_kf' if args.kernel_filter else '') + '_do' + str(args.dropout) + '_' + args.pooling
 
 model = multi_gpu_model(model, gpus=args.gpus)
 
-ids = glob.glob(join(TRAIN_FOLDER,'*/*.jpg'))
-ids.sort()
+if not args.test:
+    # TRAINING
 
-ids_train, ids_val = train_test_split(ids, test_size=0.1, random_state=42)
+    ids = glob.glob(join(TRAIN_FOLDER,'*/*.jpg'))
+    ids.sort()
 
-opt = Adam(lr=args.learning_rate)
-#opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
+    ids_train, ids_val = train_test_split(ids, test_size=0.1, random_state=42)
 
-model.compile(optimizer=opt, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    opt = Adam(lr=args.learning_rate)
+    #opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
 
-if True:
-    metric  = "-val_acc{val_acc:.6f}"
-    monitor = 'val_acc'
+    model.compile(optimizer=opt, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
-    save_checkpoint = ModelCheckpoint(
-            join(MODEL_FOLDER, model_name+"-epoch{epoch:02d}"+metric+".hdf5"),
-            monitor=monitor,
-            verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
+    if True:
+        metric  = "-val_acc{val_acc:.6f}"
+        monitor = 'val_acc'
 
-    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=4, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
+        save_checkpoint = ModelCheckpoint(
+                join(MODEL_FOLDER, model_name+"-epoch{epoch:02d}"+metric+".hdf5"),
+                monitor=monitor,
+                verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
 
-    model.fit_generator(
-            generator        = gen(ids_train, args.batch_size),
-            steps_per_epoch  = int(math.ceil(len(ids_train)  // args.batch_size)),
-            validation_data  = gen(ids_val, args.batch_size, training = False),
-            validation_steps = int(math.ceil(len(ids_val) // args.batch_size)),
-            epochs = args.max_epoch,
-            callbacks = [save_checkpoint, reduce_lr],
-            initial_epoch = last_epoch)
-            #use_multiprocessing=True, 
-            #workers=31,
-            #max_queue_size=16)
+        reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=4, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
+
+        model.fit_generator(
+                generator        = gen(ids_train, args.batch_size),
+                steps_per_epoch  = int(math.ceil(len(ids_train)  // args.batch_size)),
+                validation_data  = gen(ids_val, args.batch_size, training = False),
+                validation_steps = int(math.ceil(len(ids_val) // args.batch_size)),
+                epochs = args.max_epoch,
+                callbacks = [save_checkpoint, reduce_lr],
+                initial_epoch = last_epoch)
+                #use_multiprocessing=True, 
+                #workers=31,
+                #max_queue_size=16)
+else:
+    # TEST
+    ids = glob.glob(join(TEST_FOLDER,'*.tif'))
+    ids.sort()
+
+    with open('submission.csv', 'w') as csvfile:
+        csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        csv_writer.writerow(['fname','camera'])
+
+        for idx in tqdm(ids):
+
+            img = np.array(Image.open(idx))
+            img = np.expand_dims(preprocess_image(img), axis=0)
+
+            manipulated = np.float32([[0.5 if idx.find('manip') != -1 else -0.5]])
+
+            prediction = model.predict_on_batch([img,manipulated])
+            class_idx = np.argmax(prediction)
+
+            csv_writer.writerow([idx.split('/')[-1], CLASSES[class_idx]])
+                
