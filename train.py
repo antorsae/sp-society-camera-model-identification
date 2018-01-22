@@ -47,9 +47,8 @@ random.seed(SEED)
 # TODO tf seed
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--max-epoch', type=int, default=100, help='Epoch to run')
-parser.add_argument('-b', '--batch-size', type=int, default=64, help='Batch Size during training, e.g. -b 64')
-parser.add_argument('-s', '--sub-batch-size', type=int, default=1, help='Number of crops from same image for each batch')
+parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
+parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-3, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
 parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout rate')
@@ -62,14 +61,17 @@ parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of po
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
+parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
 
 args = parser.parse_args()
 
-args.preprocessed_input_path += '.pkl'
+args.preprocessed_input_path += '-x.pkl' if args.extra_dataset else '.pkl'
 
-TRAIN_FOLDER = 'train'
-TEST_FOLDER  = 'test'
-MODEL_FOLDER = 'models'
+TRAIN_FOLDER       = 'train'
+EXTRA_TRAIN_FOLDER = 'flickr_images'
+EXTRA_VAL_FOLDER   = 'val_images'
+TEST_FOLDER        = 'test'
+MODEL_FOLDER       = 'models'
 
 CROP_SIZE = args.crop_size
 CLASSES = [
@@ -83,6 +85,19 @@ CLASSES = [
     'Motorola-Nexus-6',
     'Samsung-Galaxy-Note3',
     'Sony-NEX-7']
+
+EXTRA_CLASSES = [
+    'htc_m7',
+    'iphone_6',
+    'moto_maxx',
+    'moto_x',
+    'samsung_s4',
+    'iphone_4s',
+    'nexus_5x',
+    'nexus_6',
+    'samsung_note3',
+    'sony_nex7'
+]
 
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
 
@@ -175,7 +190,6 @@ def get_size(obj, seen=None):
         return size
 
 def get_crop(img, crop_size):
-    # resize image so it's same as test images and pad it (reflect) if requested crop is bigger than image
     center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
     half_crop = crop_size // 2
     pad_x = max(0, crop_size - img.shape[1])
@@ -184,7 +198,6 @@ def get_crop(img, crop_size):
         img = np.pad(img, ((pad_y//2, pad_y - pad_y//2), (pad_x//2, pad_x - pad_x//2), (0,0)), mode='reflect')
         center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
     return img[center_y - half_crop : center_y + half_crop, center_x - half_crop : center_x + half_crop]
-
 
 def gen(items, batch_size, training=True, inference=False):
 
@@ -215,13 +228,22 @@ def gen(items, batch_size, training=True, inference=False):
             if not inference:
 
                 class_name = item.split('/')[-2]
-                assert class_name in CLASSES
-                class_idx = CLASSES.index(class_name)
+
+                if class_name in CLASSES:
+                    class_idx = CLASSES.index(class_name)
+                elif class_name in EXTRA_CLASSES:
+                    class_idx = EXTRA_CLASSES.index(class_name)
+                else:
+                    assert False
 
             if item not in images_cached:
 
                 img = load_img(item)
-                img = np.array(get_crop(img, 512 * 2)) # * 2 bc many need to scale by 0.5x and still get a 512px crop
+                if img.ndim != 3:
+                    # some images may not be downloaded correclty and are B/W, skip those
+                    #print(item, img.shape)
+                    continue
+                img = np.array(get_crop(img, CROP_SIZE * 2)) # * 2 bc many need to scale by 0.5x and still get a 512px crop
                 # store it in a dict for later (greatly accelerates subsequent epochs)
                 images_cached[item] = img
 
@@ -254,11 +276,7 @@ def gen(items, batch_size, training=True, inference=False):
             if batch_idx == batch_size:
 
                 if not inference:
-                    # commented b/c converges slower... why???
 
-                    #I_O_zipped = list(zip(X, O, y))
-                    #random.shuffle(I_O_zipped)
-                    #X[:], O[:], y[:] = zip(*I_O_zipped)
                     yield([X, O], [y])
                 
                 else:   
@@ -405,11 +423,11 @@ else:
         input_shape=(CROP_SIZE, CROP_SIZE, 3), 
         pooling=args.pooling if args.pooling != 'none' else None)
 
-    x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(image_filtered)
+    #x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(image_filtered)
+    x = image_filtered
     x = classifier_model(x)
     if args.pooling == 'none':
         x = Flatten()(x)
-    x = Dropout(args.dropout)(x)
     x = concatenate([x,manipulated])
     x = Dense(256, activation='relu')(x)
     x = Dropout(args.dropout)(x)
@@ -423,8 +441,6 @@ else:
 model.summary()
 model = multi_gpu_model(model, gpus=args.gpus)
 
-
-
 if not (args.test or args.test_train):
     # TRAINING
 
@@ -432,6 +448,15 @@ if not (args.test or args.test_train):
     ids.sort()
 
     ids_train, ids_val = train_test_split(ids, test_size=0.1, random_state=SEED)
+
+    if args.extra_dataset:
+        extra_train_ids = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n')) for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'good_jpgs'))]
+        extra_train_ids.sort()
+        ids_train.extend(extra_train_ids)
+
+        extra_val_ids = glob.glob(join(EXTRA_VAL_FOLDER,'*/*.jpg'))
+        extra_val_ids.sort()
+        ids_val.extend(extra_val_ids)
 
     opt = Adam(lr=args.learning_rate)
     #opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
@@ -447,7 +472,7 @@ if not (args.test or args.test_train):
                 monitor=monitor,
                 verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
 
-        reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=4, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
+        reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=10, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
 
         model.fit_generator(
                 generator        = gen(ids_train, args.batch_size),
@@ -486,16 +511,16 @@ else:
             img = np.array(Image.open(idx))
 
             img = get_crop(img, CROP_SIZE)
-            #img = np.transpose(img, axes=(1,0,2))
             img = np.expand_dims(preprocess_image(img), axis=0)
 
             manipulated = np.float32([[1. if idx.find('manip') != -1 else 0.]])
+            # TODO: TTA when not manipulated -> perform argmax on all manipulations
 
             prediction = model.predict_on_batch([img,manipulated])
             prediction_class_idx = np.argmax(prediction)
 
             if args.test_train:
-                class_idx = CLASSES.index(idx.split('/')[-2])
+                class_idx = CLASSES.index(idx.split('/')[-2]) #todo handle EXTRA_CLASSES
                 if class_idx == prediction_class_idx:
                     correct_predictions += 1
 
