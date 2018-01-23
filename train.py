@@ -39,6 +39,7 @@ from scipy import signal
 import cv2
 import math
 import csv
+from sklearn.utils import class_weight
 
 SEED = 42
 
@@ -169,26 +170,6 @@ def preprocess_image(img):
         preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
         return preprocess_input_function(img.astype(np.float32))
 
-def get_size(obj, seen=None):
-        """Recursively finds size of objects"""
-        size = sys.getsizeof(obj)
-        if seen is None:
-                seen = set()
-        obj_id = id(obj)
-        if obj_id in seen:
-                return 0
-        # Important mark as seen *before* entering recursion to gracefully handle
-        # self-referential objects
-        seen.add(obj_id)
-        if isinstance(obj, dict):
-                size += sum([get_size(v, seen) for v in obj.values()])
-                size += sum([get_size(k, seen) for k in obj.keys()])
-        elif hasattr(obj, '__dict__'):
-                size += get_size(obj.__dict__, seen)
-        elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
-                size += sum([get_size(i, seen) for i in obj])
-        return size
-
 def get_crop(img, crop_size):
     center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
     half_crop = crop_size // 2
@@ -198,6 +179,17 @@ def get_crop(img, crop_size):
         img = np.pad(img, ((pad_y//2, pad_y - pad_y//2), (pad_x//2, pad_x - pad_x//2), (0,0)), mode='reflect')
         center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
     return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop]
+
+def get_class(class_name):
+    if class_name in CLASSES:
+        class_idx = CLASSES.index(class_name)
+    elif class_name in EXTRA_CLASSES:
+        class_idx = EXTRA_CLASSES.index(class_name)
+    else:
+        assert False
+
+    assert class_idx in range(N_CLASSES)
+    return class_idx
 
 def gen(items, batch_size, training=True, inference=False):
 
@@ -234,14 +226,7 @@ def gen(items, batch_size, training=True, inference=False):
 
                 class_name = item.split('/')[-2]
 
-                if class_name in CLASSES:
-                    class_idx = CLASSES.index(class_name)
-                elif class_name in EXTRA_CLASSES:
-                    class_idx = EXTRA_CLASSES.index(class_name)
-                else:
-                    assert False
-
-                assert class_idx in range(N_CLASSES)
+                class_idx = get_class(class_name)
 
             if item not in images_cached:
 
@@ -255,7 +240,6 @@ def gen(items, batch_size, training=True, inference=False):
                 images_cached[item] = img
 
             img =  np.array(images_cached[item])
-
 
             if validation:
                 unalt_img = np.array(img)
@@ -272,11 +256,10 @@ def gen(items, batch_size, training=True, inference=False):
 
             if validation:
                 manip_img = random_manipulation(unalt_img)
-                manipulated = 1.
                 manip_img = get_crop(manip_img, CROP_SIZE)
                 manip_img = preprocess_image(manip_img)
                 X[batch_idx + batch_size] = manip_img
-                O[batch_idx + batch_size] = manipulated
+                O[batch_idx + batch_size] = 1. # manipulated 
 
             if not inference:
                 y[batch_idx] = class_idx
@@ -303,68 +286,6 @@ def gen(items, batch_size, training=True, inference=False):
         if not os.path.isfile(args.preprocessed_input_path) and training:
             pickle.dump(images_cached, open(args.preprocessed_input_path, 'wb'))
 
-# attempt to use Sequence instead of generator to allow multiprocessing 
-# but still it's substantially slower than generator with cached images
-class CameraImagesSequence(Sequence):
-
-    def __init__(self, items, batch_size, training=True, inference=False):
-        self.X_path = items
-        self.y      = [CLASSES.index(item.split('/')[-2]) for item in items]
-
-        self.batch_size = batch_size
-        self.training   = training
-        self.inference  = inference
-
-    def __len__(self):
-        return math.ceil(len(self.X_path) / self.batch_size)
-
-    def __getitem__(self, idx):
-        batch_X_path = self.X_path[idx * self.batch_size:(idx + 1) * self.batch_size]
-        batch_y      = self.y     [idx * self.batch_size:(idx + 1) * self.batch_size]
-
-        X = np.zeros((self.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-
-        # O whether the image has been manipulated (1.) or not (0.)
-        O = np.zeros((self.batch_size, 2), dtype=np.float32)
-
-        y = np.zeros((self.batch_size),    dtype=np.int64)
-
-        for it, (item, class_idx) in enumerate(zip(batch_X_path, batch_y)):
-            img = load_img(item)
-
-            # resize image so it's same as test images
-            #img = skimage.transform.resize(img, (512, 512), mode='reflect')
-
-            img = preprocess_image(img)
-
-            # at this point we now have img
-            sx= random.randint(0, 1)
-            sy= random.randint(0, 1)
-
-            _sx = img.shape[1] - CROP_SIZE if sx == 1 else 0
-            _sy = img.shape[0] - CROP_SIZE if sy == 1 else 0
-
-            _img = img[_sy:_sy+CROP_SIZE, _sx:_sx+CROP_SIZE]
-
-            X[it] = _img
-            O[it] = np.float32([sx, sy]) - np.float32([0.5,0.5])
-            y[it] = class_idx
-
-        return [X, O], y
-
-    # instead could have used shuffle=True on .fit_generator(...) https://keras.io/models/model/
-    def on_epoch_end(self):
-            """Method called at the end of every epoch.
-            """
-            print('\nEpoch end' )
-            if self.training:
-                print("Shuffling")
-                I_O_zipped = list(zip(self.X_path, self.y))
-                random.shuffle(I_O_zipped)
-                self.X_path, self.y = zip(*I_O_zipped)
-
-
-
 def SmallNet(include_top, weights, input_shape, pooling):
     img_input = Input(shape=input_shape)
     x = Conv2D( 3, (7, 7), strides=(1,1), padding='valid', name='filtering')(img_input)
@@ -387,36 +308,7 @@ def SmallNet(include_top, weights, input_shape, pooling):
 
     return model
 
-# Custom layer used to do filtering on the GPU
-# Not sure if it yields correct results so not using right now.
-class KernelFilter(Layer):
-
-    def __init__(self, **kwargs):
-        super(KernelFilter, self).__init__(**kwargs)
-
-    def build(self, input_shape):
-                
-        self.kernel_initializer = Constant(1/12. * np.float32([\
-            [-1,  2,  -2,  2, -1],  \
-            [ 2, -6,   8, -6,  2],  \
-            [-2,  8, -12,  8, -2],  \
-            [ 2, -6,   8, -6,  2],  \
-            [-1,  2,  -2,  2, -1] ]))
-
-        self.kernel = self.add_weight(
-            name='kernel',
-            shape=(5,5,3,3), # need to check this!
-            initializer=self.kernel_initializer,
-            trainable=False)
-
-        super(KernelFilter, self).build(input_shape)  # Be sure to call this somewhere!
-
-    def call(self, x):
-
-        print(x.shape)
-        print(self.kernel)
-
-        return K.conv2d(x, self.kernel, padding='same', data_format='channels_last')
+# MAIN
 
 if args.model:
     print("Loading model " + args.model)
@@ -430,7 +322,6 @@ else:
 
     input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3))
     manipulated = Input(shape=(1,))
-    image_filtered = input_image # not using this -> KernelFilter(input_shape=(CROP_SIZE, CROP_SIZE, 3))(input_image)
 
     classifier = globals()[args.classifier]
 
@@ -441,11 +332,11 @@ else:
         pooling=args.pooling if args.pooling != 'none' else None)
 
     #x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(image_filtered)
-    x = image_filtered
+    x = input_image
     x = classifier_model(x)
     if args.pooling == 'none':
         x = Flatten()(x)
-    x = concatenate([x,manipulated])
+    x = concatenate([x, manipulated])
     x = Dense(256*2, activation='relu')(x)
     x = Dropout(args.dropout)(x)
     x = Dense(128*2,  activation='relu')(x)
@@ -478,6 +369,14 @@ if not (args.test or args.test_train):
         extra_val_ids.sort()
         ids_val.extend(extra_val_ids)
 
+    classes = [get_class(idx.split('/')[-2]) for idx in ids_train]
+
+    classes_count = np.bincount(classes)
+    for class_name, class_count in zip(CLASSES, classes_count):
+        print('{:>22}: {:5d} ({:04.1f}%)'.format(class_name, class_count, 100. * class_count / len(classes)))
+
+    class_weight = class_weight.compute_class_weight('balanced', np.unique(classes), classes)
+
     opt = Adam(lr=args.learning_rate)
     #opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
 
@@ -501,10 +400,9 @@ if not (args.test or args.test_train):
                 validation_steps = int(math.ceil(len(ids_val) // args.batch_size)),
                 epochs = args.max_epoch,
                 callbacks = [save_checkpoint, reduce_lr],
-                initial_epoch = last_epoch)
-                #use_multiprocessing=True, 
-                #workers=31,
-                #max_queue_size=16)
+                initial_epoch = last_epoch,
+                class_weight=class_weight)
+
 else:
     # TEST
     if args.test:
@@ -540,7 +438,7 @@ else:
             prediction_class_idx = np.argmax(prediction)
 
             if args.test_train:
-                class_idx = CLASSES.index(idx.split('/')[-2]) #todo handle EXTRA_CLASSES
+                class_idx = get_class(idx.split('/')[-2])
                 if class_idx == prediction_class_idx:
                     correct_predictions += 1
 
