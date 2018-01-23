@@ -47,7 +47,7 @@ random.seed(SEED)
 # TODO tf seed
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
+parser.add_argument('--max-epoch', type=int, default=100, help='Epoch to run')
 parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-3, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
@@ -65,7 +65,7 @@ parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use data
 
 args = parser.parse_args()
 
-args.preprocessed_input_path += '-x.pkl' if args.extra_dataset else '.pkl'
+args.preprocessed_input_path += '-' + str(args.crop_size) + ('-x.pkl' if args.extra_dataset else '.pkl')
 
 TRAIN_FOLDER       = 'train'
 EXTRA_TRAIN_FOLDER = 'flickr_images'
@@ -197,20 +197,25 @@ def get_crop(img, crop_size):
     if (pad_x > 0) or (pad_y > 0):
         img = np.pad(img, ((pad_y//2, pad_y - pad_y//2), (pad_x//2, pad_x - pad_x//2), (0,0)), mode='reflect')
         center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
-    return img[center_y - half_crop : center_y + half_crop, center_x - half_crop : center_x + half_crop]
+    return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop]
 
 def gen(items, batch_size, training=True, inference=False):
 
     images_cached = { }
 
-    # X holds image crops
-    X = np.zeros((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+    validation = not training and not inference
+    training   = training and not inference
 
-    # O holds whether the image has been manipulated or not
-    O = np.zeros((batch_size, 1), dtype=np.float32)
+    valid_batch_factor = 2 if validation else 1
+
+    # X holds image crops
+    X = np.zeros((batch_size * valid_batch_factor, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+
+    # O whether the image has been manipulated (1.) or not (0.)
+    O = np.zeros((batch_size * valid_batch_factor, 1), dtype=np.float32)
 
     if not inference:
-        y = np.zeros((batch_size), dtype=np.int64)
+        y = np.zeros((batch_size * valid_batch_factor), dtype=np.int64)
 
     batch_idx = 0
     
@@ -236,6 +241,8 @@ def gen(items, batch_size, training=True, inference=False):
                 else:
                     assert False
 
+                assert class_idx in range(N_CLASSES)
+
             if item not in images_cached:
 
                 img = load_img(item)
@@ -249,24 +256,33 @@ def gen(items, batch_size, training=True, inference=False):
 
             img =  np.array(images_cached[item])
 
-            #print("o: ", img.shape, item)
+
+            if validation:
+                unalt_img = np.array(img)
+
             manipulated = 0.
-            if (np.random.rand() < 0.5) and not inference:
+            if (np.random.rand() < 0.5) and training:
                 img = random_manipulation(img)
-                #print("am: ", img.shape, item)
                 manipulated = 1.
 
-            #print("bc: ", img.shape, item)
             img = get_crop(img, CROP_SIZE)
-            #print("ac: ", img.shape, item)
             img = preprocess_image(img)
-            #print("ap: ", img.shape, item)
-
             X[batch_idx] = img
             O[batch_idx] = manipulated
 
+            if validation:
+                manip_img = random_manipulation(unalt_img)
+                manipulated = 1.
+                manip_img = get_crop(manip_img, CROP_SIZE)
+                manip_img = preprocess_image(manip_img)
+                X[batch_idx + batch_size] = manip_img
+                O[batch_idx + batch_size] = manipulated
+
             if not inference:
                 y[batch_idx] = class_idx
+
+                if validation:
+                    y[batch_idx + batch_size] = class_idx
 
             if batch_idx == 0 and False: #remove False if you want to see images on stdout (requires iterm2)
                 show_image(X[batch_idx])
@@ -308,8 +324,9 @@ class CameraImagesSequence(Sequence):
 
         X = np.zeros((self.batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
 
-        # O holds normalized float of where the crop is in the image (local relative position)
+        # O whether the image has been manipulated (1.) or not (0.)
         O = np.zeros((self.batch_size, 2), dtype=np.float32)
+
         y = np.zeros((self.batch_size),    dtype=np.int64)
 
         for it, (item, class_idx) in enumerate(zip(batch_X_path, batch_y)):
@@ -429,9 +446,9 @@ else:
     if args.pooling == 'none':
         x = Flatten()(x)
     x = concatenate([x,manipulated])
-    x = Dense(256, activation='relu')(x)
+    x = Dense(256*2, activation='relu')(x)
     x = Dropout(args.dropout)(x)
-    x = Dense(128,  activation='relu')(x)
+    x = Dense(128*2,  activation='relu')(x)
     x = Dropout(args.dropout)(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
@@ -447,9 +464,12 @@ if not (args.test or args.test_train):
     ids = glob.glob(join(TRAIN_FOLDER,'*/*.jpg'))
     ids.sort()
 
-    ids_train, ids_val = train_test_split(ids, test_size=0.1, random_state=SEED)
+    if not args.extra_dataset:
+        ids_train, ids_val = train_test_split(ids, test_size=0.1, random_state=SEED)
+    else:
+        ids_train = ids
+        ids_val   = [ ]
 
-    if args.extra_dataset:
         extra_train_ids = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n')) for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'good_jpgs'))]
         extra_train_ids.sort()
         ids_train.extend(extra_train_ids)
