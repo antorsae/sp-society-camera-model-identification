@@ -66,6 +66,7 @@ parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply k
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
+parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
 
 args = parser.parse_args()
 
@@ -186,9 +187,9 @@ def get_crop(img, crop_size, random_crop=False):
     if random_crop:
         freedom_x, freedom_y = img.shape[1] - crop_size, img.shape[0] - crop_size
         if freedom_x > 0:
-            center_x += np.random.randint(-freedom_x//2, freedom_x - freedom_x//2)
+            center_x += np.random.randint(math.ceil(-freedom_x/2), freedom_x - math.floor(freedom_x/2) )
         if freedom_y > 0:
-            center_y += np.random.randint(-freedom_y//2, freedom_y - freedom_y//2)
+            center_y += np.random.randint(math.ceil(-freedom_y/2), freedom_y - math.floor(freedom_y/2) )
 
     return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop]
 
@@ -251,6 +252,9 @@ def gen(items, batch_size, training=True, inference=False):
 
             img =  np.array(images_cached[item])
 
+            if args.verbose:
+                print("om: ", img.shape, item)
+
             if validation:
                 unalt_img = np.array(img)
 
@@ -258,15 +262,22 @@ def gen(items, batch_size, training=True, inference=False):
             if (np.random.rand() < 0.5) and training:
                 img = random_manipulation(img)
                 manipulated = 1.
+                if args.verbose:
+                    print("am: ", img.shape, item)
 
-            img = get_crop(img, CROP_SIZE, random_crop=True)
+            img = get_crop(img, CROP_SIZE, random_crop=True if training else False)
+            if args.verbose:
+                print("ac: ", img.shape, item)
+
             img = preprocess_image(img)
+            if args.verbose:
+                print("ap: ", img.shape, item)
             X[batch_idx] = img
             O[batch_idx] = manipulated
 
             if validation:
                 manip_img = random_manipulation(unalt_img)
-                manip_img = get_crop(manip_img, CROP_SIZE, random_crop=True)
+                manip_img = get_crop(manip_img, CROP_SIZE)
                 manip_img = preprocess_image(manip_img)
                 X[batch_idx + batch_size] = manip_img
                 O[batch_idx + batch_size] = 1. # manipulated 
@@ -317,6 +328,7 @@ def SmallNet(include_top, weights, input_shape, pooling):
 
     return model
 
+# see https://arxiv.org/pdf/1703.04856.pdf
 def CaCNN(include_top, weights, input_shape, pooling):
 
     img_input = Input(shape=input_shape)
