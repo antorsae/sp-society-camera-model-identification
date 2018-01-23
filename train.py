@@ -14,7 +14,8 @@ from keras.losses import binary_crossentropy
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, LambdaCallback
 from keras.preprocessing.image import ImageDataGenerator
 from keras.models import load_model, Model
-from keras.layers import concatenate, Lambda, Input, Dense, Dropout, Flatten, Conv2D, MaxPooling2D, BatchNormalization, Activation
+from keras.layers import concatenate, Lambda, Input, Dense, Dropout, Flatten, Conv2D, MaxPooling2D, \
+        BatchNormalization, Activation, GlobalAveragePooling2D, SeparableConv2D
 from keras.utils import to_categorical, Sequence
 from keras.initializers import Constant
 from keras.applications import *
@@ -56,9 +57,11 @@ parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout r
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
+parser.add_argument('-cf', '--crop-factor', type=int, default=2, help='Crop scaling factor for caching')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
 parser.add_argument('-pp','--preprocessed_input_path', type=str, default='images_preprocessed', help='Path to preprocessed images')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use')
+parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
@@ -66,7 +69,7 @@ parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use data
 
 args = parser.parse_args()
 
-args.preprocessed_input_path += '-' + str(args.crop_size) + ('-x.pkl' if args.extra_dataset else '.pkl')
+args.preprocessed_input_path += '-cf_' + str(args.crop_factor) + '-cs_' + str(args.crop_size) + ('-x.pkl' if args.extra_dataset else '.pkl')
 
 TRAIN_FOLDER       = 'train'
 EXTRA_TRAIN_FOLDER = 'flickr_images'
@@ -127,6 +130,8 @@ def random_manipulation(img, manipulation=None):
     elif manipulation.startswith('bicubic'):
         scale = float(manipulation[7:])
         im_decoded = cv2.resize(img,(0,0), fx=scale, fy=scale, interpolation = cv2.INTER_CUBIC)
+    else:
+        assert False
     return im_decoded
 
 def preprocess_image(img):
@@ -170,14 +175,21 @@ def preprocess_image(img):
         preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
         return preprocess_input_function(img.astype(np.float32))
 
-def get_crop(img, crop_size):
+def get_crop(img, crop_size, random_crop=False):
     center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
     half_crop = crop_size // 2
     pad_x = max(0, crop_size - img.shape[1])
     pad_y = max(0, crop_size - img.shape[0])
     if (pad_x > 0) or (pad_y > 0):
-        img = np.pad(img, ((pad_y//2, pad_y - pad_y//2), (pad_x//2, pad_x - pad_x//2), (0,0)), mode='reflect')
+        img = np.pad(img, ((pad_y//2, pad_y - pad_y//2), (pad_x//2, pad_x - pad_x//2), (0,0)), mode='wrap')
         center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
+    if random_crop:
+        freedom_x, freedom_y = img.shape[1] - crop_size, img.shape[0] - crop_size
+        if freedom_x > 0:
+            center_x += np.random.randint(-freedom_x//2, freedom_x - freedom_x//2)
+        if freedom_y > 0:
+            center_y += np.random.randint(-freedom_y//2, freedom_y - freedom_y//2)
+
     return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop]
 
 def get_class(class_name):
@@ -187,7 +199,6 @@ def get_class(class_name):
         class_idx = EXTRA_CLASSES.index(class_name)
     else:
         assert False
-
     assert class_idx in range(N_CLASSES)
     return class_idx
 
@@ -196,8 +207,9 @@ def gen(items, batch_size, training=True, inference=False):
     images_cached = { }
 
     validation = not training and not inference
-    training   = training and not inference
+    training   =     training and not inference
 
+    # during validation we store the unaltered images on batch_idx and a manip one on batch_idx + batch_size, hence the 2
     valid_batch_factor = 2 if validation else 1
 
     # X holds image crops
@@ -225,7 +237,6 @@ def gen(items, batch_size, training=True, inference=False):
             if not inference:
 
                 class_name = item.split('/')[-2]
-
                 class_idx = get_class(class_name)
 
             if item not in images_cached:
@@ -233,9 +244,8 @@ def gen(items, batch_size, training=True, inference=False):
                 img = load_img(item)
                 if img.ndim != 3:
                     # some images may not be downloaded correclty and are B/W, skip those
-                    #print(item, img.shape)
                     continue
-                img = np.array(get_crop(img, CROP_SIZE * 2)) # * 2 bc many need to scale by 0.5x and still get a 512px crop
+                img = np.array(get_crop(img, CROP_SIZE * args.crop_factor)) # * 2 bc many need to scale by 0.5x and still get a 512px crop
                 # store it in a dict for later (greatly accelerates subsequent epochs)
                 images_cached[item] = img
 
@@ -249,14 +259,14 @@ def gen(items, batch_size, training=True, inference=False):
                 img = random_manipulation(img)
                 manipulated = 1.
 
-            img = get_crop(img, CROP_SIZE)
+            img = get_crop(img, CROP_SIZE, random_crop=True)
             img = preprocess_image(img)
             X[batch_idx] = img
             O[batch_idx] = manipulated
 
             if validation:
                 manip_img = random_manipulation(unalt_img)
-                manip_img = get_crop(manip_img, CROP_SIZE)
+                manip_img = get_crop(manip_img, CROP_SIZE, random_crop=True)
                 manip_img = preprocess_image(manip_img)
                 X[batch_idx + batch_size] = manip_img
                 O[batch_idx + batch_size] = 1. # manipulated 
@@ -288,9 +298,8 @@ def gen(items, batch_size, training=True, inference=False):
 
 def SmallNet(include_top, weights, input_shape, pooling):
     img_input = Input(shape=input_shape)
-    x = Conv2D( 3, (7, 7), strides=(1,1), padding='valid', name='filtering')(img_input)
 
-    x = Conv2D(64, (3, 3), strides=(2,2), padding='valid', name='conv1')(x)
+    x = Conv2D(64, (3, 3), strides=(2,2), padding='valid', name='conv1')(img_input)
     x = BatchNormalization()(x)
     x = Activation('relu')(x)
 
@@ -305,6 +314,57 @@ def SmallNet(include_top, weights, input_shape, pooling):
     x = MaxPooling2D(pool_size=(3, 3), strides=(2,2), padding='valid')(x)
 
     model = Model(img_input, x, name='smallnet')
+
+    return model
+
+def CaCNN(include_top, weights, input_shape, pooling):
+
+    img_input = Input(shape=input_shape)
+
+    def CaCNNBlock(x, preffix=''):
+        x = Conv2D(  8, (3, 3), strides=(1,1), padding='valid', name=preffix+'conv1')(x)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+
+        x = Conv2D( 16, (3, 3), strides=(1,1), padding='valid', name=preffix+'conv2')(x)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+
+        x = Conv2D( 32, (3, 3), strides=(1,1), padding='valid', name=preffix+'conv3')(x)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+
+        x = Conv2D( 64, (3, 3), strides=(1,1), padding='valid', name=preffix+'conv4')(x)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+
+        x = Conv2D(128, (3, 3), strides=(1,1), padding='valid', name=preffix+'conv5')(x)
+        x = BatchNormalization()(x)
+        x = Activation('relu')(x)
+
+        x = GlobalAveragePooling2D(name=preffix+'pooling')(x)  
+        
+        return x
+
+    x = img_input
+
+    x1 = Conv2D(3, (3, 3), use_bias=False, padding='valid', name='filter1')(x)
+    x1 = BatchNormalization()(x1)
+    x1 = CaCNNBlock(x1, preffix='block1')
+
+    x2 = Conv2D(3, (5, 5), use_bias=False, padding='valid', name='filter2')(x)
+    x2 = BatchNormalization()(x2)
+    x2 = CaCNNBlock(x2, preffix='block2')
+
+    x3 = Conv2D(3, (7, 7), use_bias=False, padding='valid', name='filter3')(x)
+    x3 = BatchNormalization()(x3)
+    x3 = CaCNNBlock(x3, preffix='block3')
+
+    x = concatenate([x1,x2,x3])
+
+    model = Model(img_input, x, name='cacnn')
+
+    model.summary()
 
     return model
 
@@ -336,11 +396,13 @@ else:
     x = classifier_model(x)
     if args.pooling == 'none':
         x = Flatten()(x)
+        x = Dropout(args.dropout)(x)
     x = concatenate([x, manipulated])
-    x = Dense(256*2, activation='relu')(x)
-    x = Dropout(args.dropout)(x)
-    x = Dense(128*2,  activation='relu')(x)
-    x = Dropout(args.dropout)(x)
+    if not args.no_fcs:
+        x = Dense(256, activation='relu')(x)
+        x = Dropout(args.dropout)(x)
+        x = Dense(4096,  activation='relu')(x)
+        x = Dropout(args.dropout)(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
@@ -428,13 +490,26 @@ else:
 
             img = np.array(Image.open(idx))
 
-            img = get_crop(img, CROP_SIZE)
-            img = np.expand_dims(preprocess_image(img), axis=0)
-
             manipulated = np.float32([[1. if idx.find('manip') != -1 else 0.]])
-            # TODO: TTA when not manipulated -> perform argmax on all manipulations
+            if manipulated == 0. and False: # TTA does not improve. Need to try different approach
+                unalt_img = np.array(img)
+                img = get_crop(img, CROP_SIZE)
+                img = np.expand_dims(preprocess_image(img), axis=0)
+                for manipulation in MANIPULATIONS:                
+                    manip_img = random_manipulation(unalt_img, manipulation=manipulation)
+                    manip_img = get_crop(manip_img, CROP_SIZE)
+                    manip_img = np.expand_dims(preprocess_image(manip_img), axis=0)
+                    img = np.concatenate((img, manip_img), axis=0)
+                    manipulated = np.concatenate((manipulated, np.float32([[1.]])), axis=0)
+            else:
+                img = get_crop(img, CROP_SIZE)
+                img = np.expand_dims(preprocess_image(img), axis=0)
 
             prediction = model.predict_on_batch([img,manipulated])
+            if prediction.shape[0] != 1: # TTA
+                # manipulations
+                prediction = np.mean(prediction, axis=0)
+
             prediction_class_idx = np.argmax(prediction)
 
             if args.test_train:
@@ -443,8 +518,8 @@ else:
                     correct_predictions += 1
 
             if args.test:
-
                 csv_writer.writerow([idx.split('/')[-1], CLASSES[prediction_class_idx]])
+
         if args.test_train:
             print("Accuracy: " + str(correct_predictions / i))
                 
