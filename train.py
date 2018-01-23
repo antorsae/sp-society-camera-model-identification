@@ -70,7 +70,7 @@ parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/ve
 
 args = parser.parse_args()
 
-args.preprocessed_input_path += '-cf_' + str(args.crop_factor) + '-cs_' + str(args.crop_size) + ('-x.pkl' if args.extra_dataset else '.pkl')
+args.preprocessed_input_path += '-c_' + str(args.crop_factor * args.crop_size) + ('-x.pkl' if args.extra_dataset else '.pkl')
 
 TRAIN_FOLDER       = 'train'
 EXTRA_TRAIN_FOLDER = 'flickr_images'
@@ -155,6 +155,7 @@ def preprocess_image(img):
         classifier_to_module = { 
             'NASNetLarge'       : 'nasnet',
             'NASNetMobile'      : 'nasnet',
+            'DenseNet40'        : 'densenet',
             'DenseNet121'       : 'densenet',
             'DenseNet161'       : 'densenet',
             'DenseNet201'       : 'densenet',
@@ -380,6 +381,37 @@ def CaCNN(include_top, weights, input_shape, pooling):
 
     return model
 
+def DenseNet40(input_shape=None,
+                    bottleneck=True,
+                    reduction=0.5,
+                    dropout_rate=0.0,
+                    weight_decay=1e-4,
+                    include_top=True,
+                    weights='imagenet',
+                    input_tensor=None,
+                    pooling=None,
+                    classes=1000,
+                    activation='softmax'):
+
+    return densenet.DenseNet(input_shape=input_shape,
+                 depth=40,
+                 nb_dense_block=3,
+                 growth_rate=12,
+                 nb_filter=-1,
+                 nb_layers_per_block=-1,
+                 bottleneck=bottleneck,
+                 reduction=reduction,
+                 dropout_rate=dropout_rate,
+                 weight_decay=weight_decay,
+                 subsample_initial_block=False,
+                 include_top=include_top,
+                 weights=weights,
+                 input_tensor=input_tensor,
+                 pooling=pooling,
+                 classes=classes,
+                 activation=activation,
+                 transition_pooling='avg')
+
 # MAIN
 
 if args.model:
@@ -461,7 +493,7 @@ if not (args.test or args.test_train):
         monitor = 'val_acc'
 
         save_checkpoint = ModelCheckpoint(
-                join(MODEL_FOLDER, model_name+"-epoch{epoch:02d}"+metric+".hdf5"),
+                join(MODEL_FOLDER, model_name+"-epoch{epoch:03d}"+metric+".hdf5"),
                 monitor=monitor,
                 verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
 
@@ -502,24 +534,24 @@ else:
 
             img = np.array(Image.open(idx))
 
-            manipulated = np.float32([[1. if idx.find('manip') != -1 else 0.]])
-            if manipulated == 0. and False: # TTA does not improve. Need to try different approach
-                unalt_img = np.array(img)
-                img = get_crop(img, CROP_SIZE)
-                img = np.expand_dims(preprocess_image(img), axis=0)
-                for manipulation in MANIPULATIONS:                
-                    manip_img = random_manipulation(unalt_img, manipulation=manipulation)
-                    manip_img = get_crop(manip_img, CROP_SIZE)
-                    manip_img = np.expand_dims(preprocess_image(manip_img), axis=0)
-                    img = np.concatenate((img, manip_img), axis=0)
-                    manipulated = np.concatenate((manipulated, np.float32([[1.]])), axis=0)
-            else:
-                img = get_crop(img, CROP_SIZE)
-                img = np.expand_dims(preprocess_image(img), axis=0)
+            manipulated = np.float32([1. if idx.find('manip') != -1 else 0.])
 
-            prediction = model.predict_on_batch([img,manipulated])
+            sx = img.shape[1] // CROP_SIZE
+            sy = img.shape[0] // CROP_SIZE
+            img_batch = np.zeros(( sx * sy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+            manipulated_batch = np.zeros((sx * sy, 1),  dtype=np.float32)
+            i = 0
+            for x in range(sx):
+                for y in range(sy):
+                    _img = np.array(img[y*CROP_SIZE:(y+1)*CROP_SIZE, x*CROP_SIZE:(x+1)*CROP_SIZE])
+
+                    img_batch[i]         = preprocess_image(_img)
+                    manipulated_batch[i] = manipulated
+                    i += 1
+
+            prediction = model.predict_on_batch([img_batch,manipulated_batch])
             if prediction.shape[0] != 1: # TTA
-                # manipulations
+                # all crops
                 prediction = np.mean(prediction, axis=0)
 
             prediction_class_idx = np.argmax(prediction)
