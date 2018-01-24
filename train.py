@@ -103,6 +103,23 @@ EXTRA_CLASSES = [
     'sony_nex7'
 ]
 
+RESOLUTIONS = [
+    [1520,2688], # flips
+    [3264,2448], # no flips
+    [2432,4320], # flips
+    [3120,4160], # flips
+    [4128,2322], # no flips
+    [3264,2448], # no flips
+    [3024,4032], # flips
+    [1040,780], 
+    [3088,4130], [3120,4160], # flips
+    [4128,2322], # no flips
+    [6000,4000], # no flips
+]
+
+# flip it too
+RESOLUTIONS.extend([resolution[::-1] for resolution in RESOLUTIONS])
+
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
 
 N_CLASSES = len(CLASSES)
@@ -212,15 +229,21 @@ def process_item(item, training):
 
     img = load_img_fast_jpg(item)
 
-    # TODO check aspect ratio and discard panoramas etc
-    if img.ndim != 3:
-        # some images may not be downloaded correclty and are B/W, skip those
-        print(item)
+    shape = list(img.shape[:2])
+
+    # discard images that do not have right solution
+    if shape not in RESOLUTIONS:
         return None
 
-    # TODO: check orientation and aspect ratio and decide if normalize it or augment
+    # some images may not be downloaded correclty and are B/W, skip those
+    if img.ndim != 3:
+        return None
 
-    img = get_crop(img, CROP_SIZE * 2) # * 2 bc many need to scale by 0.5x and still get a 512px crop
+    # some images are landscape, others are portrait, so augment training by randomly changing orientation
+    if (np.random.rand() < 0.5) and training:
+        img = np.swapaxes(img, 0,1)
+
+    img = get_crop(img, CROP_SIZE * 2, random_crop=True if training else False) # * 2 bc many need to scale by 0.5x and still get a 512px crop
 
     if args.verbose:
         print("om: ", img.shape, item)
@@ -257,14 +280,14 @@ def gen(items, batch_size, training=True, inference=False):
     # class index
     y = np.empty((batch_size * valid_batch_factor), dtype=np.int64)
     
+    p = Pool(cpu_count()-2)
+
     while True:
 
         if training:
             random.shuffle(items)
 
         process_item_func  = partial(process_item, training=training)
-
-        p = Pool(cpu_count()-2)
 
         batch_idx = 0
         iter_items = iter(items)
@@ -513,20 +536,24 @@ else:
 
             sx = img.shape[1] // CROP_SIZE
             sy = img.shape[0] // CROP_SIZE
-            img_batch = np.zeros(( sx * sy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-            manipulated_batch = np.zeros((sx * sy, 1),  dtype=np.float32)
+            img_batch = np.zeros((2* sx * sy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+            manipulated_batch = np.zeros((2* sx * sy, 1),  dtype=np.float32)
             i = 0
-            for x in range(sx):
-                for y in range(sy):
-                    _img = np.array(img[y*CROP_SIZE:(y+1)*CROP_SIZE, x*CROP_SIZE:(x+1)*CROP_SIZE])
+            for it in range(2):
+                if it == 1:
+                    img = np.swapaxes(img, 0,1)
+                for x in range(sx):
+                    for y in range(sy):
+                        _img = np.array(img[y*CROP_SIZE:(y+1)*CROP_SIZE, x*CROP_SIZE:(x+1)*CROP_SIZE])
 
-                    img_batch[i]         = preprocess_image(_img)
-                    manipulated_batch[i] = manipulated
-                    i += 1
+                        img_batch[i]         = preprocess_image(_img)
+                        manipulated_batch[i] = manipulated
+                        i += 1
 
             prediction = model.predict_on_batch([img_batch,manipulated_batch])
             if prediction.shape[0] != 1: # TTA
-                # all crops
+                # all crops and flip
+                # TODO: geometric mean
                 prediction = np.mean(prediction, axis=0)
 
             prediction_class_idx = np.argmax(prediction)
