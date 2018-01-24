@@ -24,7 +24,6 @@ from multi_gpu_keras import multi_gpu_model
 from keras import backend as K
 from keras.engine.topology import Layer
 import skimage
-import pickle
 from iterm import show_image
 from tqdm import tqdm
 from PIL import Image
@@ -41,6 +40,10 @@ import cv2
 import math
 import csv
 from sklearn.utils import class_weight
+from multiprocessing import Pool, cpu_count
+
+from functools import partial
+from itertools import  islice
 
 SEED = 42
 
@@ -57,9 +60,7 @@ parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout r
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
-parser.add_argument('-cf', '--crop-factor', type=int, default=2, help='Crop scaling factor for caching')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
-parser.add_argument('-pp','--preprocessed_input_path', type=str, default='images_preprocessed', help='Path to preprocessed images')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
@@ -69,8 +70,6 @@ parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use data
 parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
 
 args = parser.parse_args()
-
-args.preprocessed_input_path += '-c_' + str(args.crop_factor * args.crop_size) + ('-x.pkl' if args.extra_dataset else '.pkl')
 
 TRAIN_FOLDER       = 'train'
 EXTRA_TRAIN_FOLDER = 'flickr_images'
@@ -107,7 +106,7 @@ EXTRA_CLASSES = [
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
 
 N_CLASSES = len(CLASSES)
-#load_img  = lambda img_path: jpeg.JPEG(img_path).decode()
+load_img_fast_jpg  = lambda img_path: jpeg.JPEG(img_path).decode()
 load_img  = lambda img_path: np.array(Image.open(img_path))
 
 def random_manipulation(img, manipulation=None):
@@ -204,109 +203,83 @@ def get_class(class_name):
     assert class_idx in range(N_CLASSES)
     return class_idx
 
+def process_item(item, training):
+
+    class_name = item.split('/')[-2]
+    class_idx = get_class(class_name)
+
+    validation = not training 
+
+    img = load_img_fast_jpg(item)
+
+    # TODO check aspect ratio and discard panoramas etc
+    if img.ndim != 3:
+        # some images may not be downloaded correclty and are B/W, skip those
+        print(item)
+        return None
+
+    # TODO: check orientation and aspect ratio and decide if normalize it or augment
+
+    img = get_crop(img, CROP_SIZE * 2) # * 2 bc many need to scale by 0.5x and still get a 512px crop
+
+    if args.verbose:
+        print("om: ", img.shape, item)
+
+    manipulated = 0.
+    if (np.random.rand() < 0.5) and training:
+        img = random_manipulation(img)
+        manipulated = 1.
+        if args.verbose:
+            print("am: ", img.shape, item)
+
+    img = get_crop(img, CROP_SIZE, random_crop=True if training else False)
+    if args.verbose:
+        print("ac: ", img.shape, item)
+
+    img = preprocess_image(img)
+    if args.verbose:
+        print("ap: ", img.shape, item)
+
+    return img, manipulated, class_idx
+
 def gen(items, batch_size, training=True, inference=False):
 
-    images_cached = { }
-
-    validation = not training and not inference
-    training   =     training and not inference
+    validation = not training 
 
     # during validation we store the unaltered images on batch_idx and a manip one on batch_idx + batch_size, hence the 2
-    valid_batch_factor = 2 if validation else 1
+    valid_batch_factor = 1 # TODO: augment validation
 
     # X holds image crops
-    X = np.zeros((batch_size * valid_batch_factor, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-
+    X = np.empty((batch_size * valid_batch_factor, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
     # O whether the image has been manipulated (1.) or not (0.)
-    O = np.zeros((batch_size * valid_batch_factor, 1), dtype=np.float32)
+    O = np.empty((batch_size * valid_batch_factor, 1), dtype=np.float32)
 
-    if not inference:
-        y = np.zeros((batch_size * valid_batch_factor), dtype=np.int64)
-
-    batch_idx = 0
+    # class index
+    y = np.empty((batch_size * valid_batch_factor), dtype=np.int64)
     
-    if os.path.isfile(args.preprocessed_input_path) and training:
-        print("Loading preprocessed images from: "+ args.preprocessed_input_path)
-        images_cached = pickle.load(open(args.preprocessed_input_path, "rb")) 
-
     while True:
 
         if training:
             random.shuffle(items)
 
-        for item in items:
+        process_item_func  = partial(process_item, training=training)
 
-            if not inference:
+        p = Pool(cpu_count()-2)
 
-                class_name = item.split('/')[-2]
-                class_idx = get_class(class_name)
+        batch_idx = 0
+        iter_items = iter(items)
+        for item_batch in iter(lambda:list(islice(iter_items, batch_size)), []):
 
-            if item not in images_cached:
+            batch_results = p.map(process_item_func, item_batch)
+            for batch_result in batch_results:
 
-                img = load_img(item)
-                if img.ndim != 3:
-                    # some images may not be downloaded correclty and are B/W, skip those
-                    continue
-                img = np.array(get_crop(img, CROP_SIZE * args.crop_factor)) # * 2 bc many need to scale by 0.5x and still get a 512px crop
-                # store it in a dict for later (greatly accelerates subsequent epochs)
-                images_cached[item] = img
+                if batch_result is not None:
+                    X[batch_idx], O[batch_idx], y[batch_idx] = batch_result
+                    batch_idx += 1
 
-            img =  np.array(images_cached[item])
-
-            if args.verbose:
-                print("om: ", img.shape, item)
-
-            if validation:
-                unalt_img = np.array(img)
-
-            manipulated = 0.
-            if (np.random.rand() < 0.5) and training:
-                img = random_manipulation(img)
-                manipulated = 1.
-                if args.verbose:
-                    print("am: ", img.shape, item)
-
-            img = get_crop(img, CROP_SIZE, random_crop=True if training else False)
-            if args.verbose:
-                print("ac: ", img.shape, item)
-
-            img = preprocess_image(img)
-            if args.verbose:
-                print("ap: ", img.shape, item)
-            X[batch_idx] = img
-            O[batch_idx] = manipulated
-
-            if validation:
-                manip_img = random_manipulation(unalt_img)
-                manip_img = get_crop(manip_img, CROP_SIZE)
-                manip_img = preprocess_image(manip_img)
-                X[batch_idx + batch_size] = manip_img
-                O[batch_idx + batch_size] = 1. # manipulated 
-
-            if not inference:
-                y[batch_idx] = class_idx
-
-                if validation:
-                    y[batch_idx + batch_size] = class_idx
-
-            if batch_idx == 0 and False: #remove False if you want to see images on stdout (requires iterm2)
-                show_image(X[batch_idx])
-
-            batch_idx += 1
-
-            if batch_idx == batch_size:
-
-                if not inference:
-
+                if batch_idx == batch_size:
                     yield([X, O], [y])
-                
-                else:   
-                    yield([X, O])
-
-                batch_idx = 0
-
-        if not os.path.isfile(args.preprocessed_input_path) and training:
-            pickle.dump(images_cached, open(args.preprocessed_input_path, 'wb'))
+                    batch_idx = 0
 
 def SmallNet(include_top, weights, input_shape, pooling):
     img_input = Input(shape=input_shape)
@@ -381,6 +354,7 @@ def CaCNN(include_top, weights, input_shape, pooling):
 
     return model
 
+# WiP
 def DenseNet40(input_shape=None,
                     bottleneck=True,
                     reduction=0.5,
@@ -443,9 +417,9 @@ else:
         x = Dropout(args.dropout)(x)
     x = concatenate([x, manipulated])
     if not args.no_fcs:
-        x = Dense(256, activation='relu')(x)
+        x = Dense(512, activation='relu')(x)
         x = Dropout(args.dropout)(x)
-        x = Dense(4096,  activation='relu')(x)
+        x = Dense(128,  activation='relu')(x)
         x = Dropout(args.dropout)(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
@@ -507,6 +481,7 @@ if not (args.test or args.test_train):
                 epochs = args.max_epoch,
                 callbacks = [save_checkpoint, reduce_lr],
                 initial_epoch = last_epoch,
+                max_queue_size = 10,
                 class_weight=class_weight)
 
 else:
