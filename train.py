@@ -28,6 +28,7 @@ from iterm import show_image
 from tqdm import tqdm
 from PIL import Image
 from io import BytesIO
+import copy
 
 import itertools
 import re
@@ -106,22 +107,23 @@ EXTRA_CLASSES = [
     'sony_nex7'
 ]
 
-RESOLUTIONS = [
-    [1520,2688], # flips
-    [3264,2448], # no flips
-    [2432,4320], # flips
-    [3120,4160], # flips
-    [4128,2322], # no flips
-    [3264,2448], # no flips
-    [3024,4032], # flips
-    [1040,780],  # Motorola-Nexus-6 no flips
-    [3088,4130], [3120,4160], # Motorola-Nexus-6 flips
-    [4128,2322], # no flips 
-    [6000,4000], # no flips
-]
+RESOLUTIONS = {
+    0: [[1520,2688]], # flips
+    1: [[3264,2448]], # no flips
+    2: [[2432,4320]], # flips
+    3: [[3120,4160]], # flips
+    4: [[4128,2322]], # no flips
+    5: [[3264,2448]], # no flips
+    6: [[3024,4032]], # flips
+    7: [[1040,780],  # Motorola-Nexus-6 no flips
+        [3088,4130], [3120,4160]], # Motorola-Nexus-6 flips
+    8: [[4128,2322]], # no flips 
+    9: [[6000,4000]], # no flips
+}
 
-# flip it too
-RESOLUTIONS.extend([resolution[::-1] for resolution in RESOLUTIONS])
+for class_id,resolutions in RESOLUTIONS.copy().items():
+    resolutions.extend([resolution[::-1] for resolution in resolutions])
+    RESOLUTIONS[class_id] = resolutions
 
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
 
@@ -223,7 +225,7 @@ def get_class(class_name):
     assert class_idx in range(N_CLASSES)
     return class_idx
 
-def process_item(item, training):
+def process_item(item, training, transforms=[[]]):
 
     class_name = item.split('/')[-2]
     class_idx = get_class(class_name)
@@ -235,38 +237,64 @@ def process_item(item, training):
     shape = list(img.shape[:2])
 
     # discard images that do not have right resolution
-    if shape not in RESOLUTIONS:
+    if shape not in RESOLUTIONS[class_idx]:
         return None
 
     # some images may not be downloaded correclty and are B/W, discard those
     if img.ndim != 3:
         return None
 
-    # some images are landscape, others are portrait, so augment training by randomly changing orientation
-    if (np.random.rand() < 0.5) and training:
-        img = np.swapaxes(img, 0,1)
+    if len(transforms) == 1:
+        _img = img
+    else:
+        _img = np.copy(img)
 
-    img = get_crop(img, CROP_SIZE * 2, random_crop=True if training else False) # * 2 bc may need to scale by 0.5x and still get a 512px crop
+        img_s         = [ ]
+        manipulated_s = [ ]
+        class_idx_s   = [ ]
 
-    if args.verbose:
-        print("om: ", img.shape, item)
+    for transform in transforms:
 
-    manipulated = 0.
-    if (np.random.rand() < 0.5) and training:
-        img = random_manipulation(img)
-        manipulated = 1.
+        force_manipulation = 'manipulation' in transform
+        force_orientation  = 'orientation'  in transform
+
+        # some images are landscape, others are portrait, so augment training by randomly changing orientation
+        if ((np.random.rand() < 0.5) and training) or force_orientation:
+            img = np.swapaxes(_img, 0,1)
+        else:
+            img = _img
+
+        img = get_crop(img, CROP_SIZE * 2, random_crop=True if training else False) # * 2 bc may need to scale by 0.5x and still get a 512px crop
+
         if args.verbose:
-            print("am: ", img.shape, item)
+            print("om: ", img.shape, item)
 
-    img = get_crop(img, CROP_SIZE, random_crop=True if training else False)
-    if args.verbose:
-        print("ac: ", img.shape, item)
+        manipulated = 0.
+        if ((np.random.rand() < 0.5) and training) or force_manipulation:
+            img = random_manipulation(img)
+            manipulated = 1.
+            if args.verbose:
+                print("am: ", img.shape, item)
 
-    img = preprocess_image(img)
-    if args.verbose:
-        print("ap: ", img.shape, item)
+        img = get_crop(img, CROP_SIZE, random_crop=True if training else False)
+        if args.verbose:
+            print("ac: ", img.shape, item)
 
-    return img, manipulated, class_idx
+        img = preprocess_image(img)
+        if args.verbose:
+            print("ap: ", img.shape, item)
+
+        if len(transforms) > 1:
+            img_s.append(img)    
+            manipulated_s.append(manipulated)
+            class_idx_s.append(class_idx)
+
+    if len(transforms) == 1:
+        return img, manipulated, class_idx
+    else:
+        return img_s, manipulated_s, class_idx_s
+
+VALIDATION_TRANSFORMS = [ [], ['orientation'], ['manipulation'], ['orientation','manipulation']]
 
 def gen(items, batch_size, training=True, inference=False):
 
@@ -285,12 +313,16 @@ def gen(items, batch_size, training=True, inference=False):
     
     p = Pool(cpu_count()-2)
 
+    transforms = VALIDATION_TRANSFORMS if validation else [[]]
+
+    assert batch_size % len(transforms) == 0
+
     while True:
 
         if training:
             random.shuffle(items)
 
-        process_item_func  = partial(process_item, training=training)
+        process_item_func  = partial(process_item, training=training, transforms=transforms)
 
         batch_idx = 0
         iter_items = iter(items)
@@ -300,8 +332,13 @@ def gen(items, batch_size, training=True, inference=False):
             for batch_result in batch_results:
 
                 if batch_result is not None:
-                    X[batch_idx], O[batch_idx], y[batch_idx] = batch_result
-                    batch_idx += 1
+                    if len(transforms) == 1:
+                        X[batch_idx], O[batch_idx], y[batch_idx] = batch_result
+                        batch_idx += 1
+                    else:
+                        for _X,_O,_y in zip(*batch_result):
+                            X[batch_idx], O[batch_idx], y[batch_idx] = _X,_O,_y
+                            batch_idx += 1
 
                 if batch_idx == batch_size:
                     yield([X, O], [y])
@@ -451,7 +488,11 @@ else:
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
-    model_name = args.classifier + ('_kf' if args.kernel_filter else '') + '_do' + str(args.dropout) + '_' + args.pooling
+    model_name = args.classifier + \
+        ('_kf' if args.kernel_filter else '') + \
+        ('_lkf' if args.learn_kernel_filter else '') + \
+        '_do' + str(args.dropout) + \
+        '_' + args.pooling
 
     if args.weights:
             model.load_weights(args.weights, by_name=True)
@@ -510,7 +551,7 @@ if not (args.test or args.test_train):
                 generator        = gen(ids_train, args.batch_size),
                 steps_per_epoch  = int(math.ceil(len(ids_train)  // args.batch_size)),
                 validation_data  = gen(ids_val, args.batch_size, training = False),
-                validation_steps = int(math.ceil(len(ids_val) // args.batch_size)),
+                validation_steps = int(len(VALIDATION_TRANSFORMS) * math.ceil(len(ids_val) // args.batch_size)),
                 epochs = args.max_epoch,
                 callbacks = [save_checkpoint, reduce_lr],
                 initial_epoch = last_epoch,
