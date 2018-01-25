@@ -52,10 +52,11 @@ random.seed(SEED)
 # TODO tf seed
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--max-epoch', type=int, default=100, help='Epoch to run')
+parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
 parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-3, help='Initial learning rate')
-parser.add_argument('-m', '--model', help='load hdf5 model (and continue training)')
+parser.add_argument('-m', '--model', help='load hdf5 model including weights (and continue training)')
+parser.add_argument('-w', '--weights', help='load hdf5 weights only (and continue training)')
 parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout rate')
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
@@ -64,6 +65,7 @@ parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
+parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='Add a trainable kernel filter before classifier')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
@@ -111,9 +113,9 @@ RESOLUTIONS = [
     [4128,2322], # no flips
     [3264,2448], # no flips
     [3024,4032], # flips
-    [1040,780], 
-    [3088,4130], [3120,4160], # flips
-    [4128,2322], # no flips
+    [1040,780],  # Motorola-Nexus-6 no flips
+    [3088,4130], [3120,4160], # Motorola-Nexus-6 flips
+    [4128,2322], # no flips 
     [6000,4000], # no flips
 ]
 
@@ -231,11 +233,11 @@ def process_item(item, training):
 
     shape = list(img.shape[:2])
 
-    # discard images that do not have right solution
+    # discard images that do not have right resolution
     if shape not in RESOLUTIONS:
         return None
 
-    # some images may not be downloaded correclty and are B/W, skip those
+    # some images may not be downloaded correclty and are B/W, discard those
     if img.ndim != 3:
         return None
 
@@ -243,7 +245,7 @@ def process_item(item, training):
     if (np.random.rand() < 0.5) and training:
         img = np.swapaxes(img, 0,1)
 
-    img = get_crop(img, CROP_SIZE * 2, random_crop=True if training else False) # * 2 bc many need to scale by 0.5x and still get a 512px crop
+    img = get_crop(img, CROP_SIZE * 2, random_crop=True if training else False) # * 2 bc may need to scale by 0.5x and still get a 512px crop
 
     if args.verbose:
         print("om: ", img.shape, item)
@@ -432,8 +434,9 @@ else:
         input_shape=(CROP_SIZE, CROP_SIZE, 3), 
         pooling=args.pooling if args.pooling != 'none' else None)
 
-    #x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(image_filtered)
     x = input_image
+    if args.learn_kernel_filter:
+        x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(x)
     x = classifier_model(x)
     if args.pooling == 'none':
         x = Flatten()(x)
@@ -448,6 +451,12 @@ else:
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
     model_name = args.classifier + ('_kf' if args.kernel_filter else '') + '_do' + str(args.dropout) + '_' + args.pooling
+
+    if args.weights:
+            model.load_weights(args.weights, by_name=True)
+            match = re.search(r'([A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
+            #model_name = match.group(1)
+            last_epoch = int(match.group(2))
 
 model.summary()
 model = multi_gpu_model(model, gpus=args.gpus)
