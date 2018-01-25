@@ -15,7 +15,7 @@ from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau, LambdaCallback
 from keras.preprocessing.image import ImageDataGenerator
 from keras.models import load_model, Model
 from keras.layers import concatenate, Lambda, Input, Dense, Dropout, Flatten, Conv2D, MaxPooling2D, \
-        BatchNormalization, Activation, GlobalAveragePooling2D, SeparableConv2D
+        BatchNormalization, Activation, GlobalAveragePooling2D, SeparableConv2D, Reshape
 from keras.utils import to_categorical, Sequence
 from keras.initializers import Constant
 from keras.applications import *
@@ -57,7 +57,8 @@ parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-3, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model including weights (and continue training)')
 parser.add_argument('-w', '--weights', help='load hdf5 weights only (and continue training)')
-parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout rate')
+parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout rate for FC layers')
+parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help='Dropout rate for classifier')
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
@@ -438,15 +439,15 @@ else:
     if args.learn_kernel_filter:
         x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(x)
     x = classifier_model(x)
-    if args.pooling == 'none':
-        x = Flatten()(x)
-        x = Dropout(args.dropout)(x)
+    x = Reshape((-1,))(x)
+    if args.dropout_classifier != 0.:
+        x = Dropout(args.dropout_classifier, name='dropout_classifier')(x)
     x = concatenate([x, manipulated])
     if not args.no_fcs:
-        x = Dense(512, activation='relu')(x)
-        x = Dropout(args.dropout)(x)
-        x = Dense(128,  activation='relu')(x)
-        x = Dropout(args.dropout)(x)
+        x = Dense(512, activation='relu', name='fc1')(x)
+        x = Dropout(args.dropout,         name='dropout_fc1')(x)
+        x = Dense(128, activation='relu', name='fc2')(x)
+        x = Dropout(args.dropout,         name='dropout_fc2')(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
