@@ -593,6 +593,9 @@ else:
             for it in range(2):
                 if it == 1:
                     img = np.swapaxes(img, 0,1)
+                    t = sx
+                    sx = sy
+                    sy = t
                 for x in range(sx):
                     for y in range(sy):
                         _img = np.array(img[y*CROP_SIZE:(y+1)*CROP_SIZE, x*CROP_SIZE:(x+1)*CROP_SIZE])
