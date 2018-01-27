@@ -1,3 +1,25 @@
+###########
+## Usage ##
+###########
+
+# sp-society-camera-model-identification should be in the $CODE directory.
+
+# alias andres="docker run --runtime=nvidia --init -it --rm \
+#               --ipc=host \
+#               -v $CODE:/code -v $DATA:/data \
+#               -w=/code/sp-society-camera-model-identification \
+#               mwksmith/cam:andres"
+
+# When you get into the container enter "sa" to activate the conda environment,
+# then create sym links to your data folders according to the globals set in train.py,
+# then run train.py.
+
+# Direct questions here: https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/48293#274879
+
+# Mini-tutorial on docker run options: https://github.com/MattKleinsmith/dockerfiles/tree/master/fastai#explanation
+
+###########
+
 FROM nvidia/cuda:9.0-cudnn7-devel-ubuntu16.04
 
 # To allow unicode characters in the terminal
