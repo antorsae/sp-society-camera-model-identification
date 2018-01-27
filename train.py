@@ -281,9 +281,12 @@ def process_item(item, training, transforms=[[]]):
 
         # some images are landscape, others are portrait, so augment training by randomly changing orientation
         if ((np.random.rand() < 0.5) and training) or force_orientation:
-            img = np.rot90(_img, 3, (0,1))
+            img = np.rot90(_img, 1, (0,1))
             # is it rot90(..3..), rot90(..1..) or both? 
             # for phones with landscape mode pics could be taken upside down too, although less likely
+            # most of the test images that are flipped are 1
+            # however,eg. img_4d7be4c_unalt looks 3
+            # and img_4df3673_manip img_6a31fd7_unalt looks 2!
         else:
             img = _img
 
@@ -496,6 +499,13 @@ else:
             match = re.search(r'([A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
             last_epoch = int(match.group(2))
 
+def print_distribution(ids, classes=None):
+    if classes is None:
+        classes = [get_class(idx.split('/')[-2]) for idx in ids]
+    classes_count = np.bincount(classes)
+    for class_name, class_count in zip(CLASSES, classes_count):
+        print('{:>22}: {:5d} ({:04.1f}%)'.format(class_name, class_count, 100. * class_count / len(classes)))
+
 model.summary()
 model = multi_gpu_model(model, gpus=args.gpus)
 
@@ -518,21 +528,33 @@ if not (args.test or args.test_train):
         extra_train_ids = [idx for idx in extra_train_ids if idx not in low_quality]
         extra_train_ids.sort()
         ids_train.extend(extra_train_ids)
+        random.shuffle(ids_train)
 
         extra_val_ids = glob.glob(join(EXTRA_VAL_FOLDER,'*/*.jpg'))
         extra_val_ids.sort()
         ids_val.extend(extra_val_ids)
 
-    classes = [get_class(idx.split('/')[-2]) for idx in ids_train]
+        classes_val = [get_class(idx.split('/')[-2]) for idx in ids_val]
+        classes_val_count = np.bincount(classes_val)
+        max_classes_val_count = max(classes_val_count)
 
-    # TODO: Filter out invalid images here to avoid (slight) class imbalance
-    # TODO: balance validation set
+        # Balance validation dataset by filling up classes with items from training set (and removing them from there)
+        for class_idx in range(N_CLASSES):
+            idx_to_transfer = [idx for idx in ids_train \
+                if get_class(idx.split('/')[-2]) == class_idx][:max_classes_val_count-classes_val_count[class_idx]]
 
-    classes_count = np.bincount(classes)
-    for class_name, class_count in zip(CLASSES, classes_count):
-        print('{:>22}: {:5d} ({:04.1f}%)'.format(class_name, class_count, 100. * class_count / len(classes)))
+            ids_train = list(set(ids_train).difference(set(idx_to_transfer)))
 
-    class_weight = class_weight.compute_class_weight('balanced', np.unique(classes), classes)
+            ids_val.extend(idx_to_transfer)
+
+    print("Training set distribution:")
+    print_distribution(ids_train)
+
+    print("Validation set distribution:")
+    print_distribution(ids_val)
+
+    classes_train = [get_class(idx.split('/')[-2]) for idx in ids_train]
+    class_weight = class_weight.compute_class_weight('balanced', np.unique(classes_train), classes_train)
 
     opt = Adam(lr=args.learning_rate)
     #opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
@@ -553,7 +575,7 @@ if not (args.test or args.test_train):
             monitor=monitor,
             verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
 
-    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=10, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
+    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
 
     model.fit_generator(
             generator        = gen(ids_train, args.batch_size),
@@ -619,7 +641,7 @@ else:
                 manipulated = np.copy(original_manipulated)
 
                 if 'orientation' in transform:
-                    img = np.rot90(img, 3, (0,1))
+                    img = np.rot90(img, 1, (0,1))
                 if 'manipulation' in transform and not original_manipulated:
                     img = random_manipulation(img)
                     manipulated = np.float32([1.])
@@ -655,11 +677,10 @@ else:
                 classes.append(prediction_class_idx)
 
         if args.test_train:
-            print("Accuracy: " + str(correct_predictions / i))
+            print("Accuracy: " + str(correct_predictions / (len(transforms) * i)))
 
         if args.test:
-            classes_count = np.bincount(classes)
-            for class_name, class_count in zip(CLASSES, classes_count):
-                print('{:>22}: {:5d} ({:04.1f}%)'.format(class_name, class_count, 100. * class_count / len(classes)))
+            print("Test set predictions distribution:")
+            print_distribution(None, classes=classes)
             print("Now you are ready to:")
             print("kg submit {}".format(csv_name))
