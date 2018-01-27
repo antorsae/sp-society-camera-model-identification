@@ -280,7 +280,7 @@ def process_item(item, training, transforms=[[]]):
         force_orientation  = ('orientation'  in transform) and ORIENTATION_FLIP_ALLOWED[class_idx]
 
         # some images are landscape, others are portrait, so augment training by randomly changing orientation
-        if ((np.random.rand() < 0.5) and training) or force_orientation:
+        if ((np.random.rand() < 0.5) and training and ORIENTATION_FLIP_ALLOWED[class_idx]) or force_orientation:
             img = np.rot90(_img, 1, (0,1))
             # is it rot90(..3..), rot90(..1..) or both? 
             # for phones with landscape mode pics could be taken upside down too, although less likely
@@ -538,7 +538,7 @@ if not (args.test or args.test_train):
         classes_val_count = np.bincount(classes_val)
         max_classes_val_count = max(classes_val_count)
 
-        # Balance validation dataset by filling up classes with items from training set (and removing them from there)
+        # Balance validation dataset by filling up classes with less items from training set (and removing those from there)
         for class_idx in range(N_CLASSES):
             idx_to_transfer = [idx for idx in ids_train \
                 if get_class(idx.split('/')[-2]) == class_idx][:max_classes_val_count-classes_val_count[class_idx]]
@@ -546,6 +546,8 @@ if not (args.test or args.test_train):
             ids_train = list(set(ids_train).difference(set(idx_to_transfer)))
 
             ids_val.extend(idx_to_transfer)
+
+        random.shuffle(ids_val)
 
     print("Training set distribution:")
     print_distribution(ids_train)
