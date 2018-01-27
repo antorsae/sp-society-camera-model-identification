@@ -125,6 +125,19 @@ RESOLUTIONS = {
     9: [[6000,4000]], # no flips
 }
 
+ORIENTATION_FLIP_ALLOWED = [
+    True,
+    False,
+    True,
+    True,
+    False,
+    False,
+    True,
+    True,
+    False,
+    False
+]
+
 for class_id,resolutions in RESOLUTIONS.copy().items():
     resolutions.extend([resolution[::-1] for resolution in resolutions])
     RESOLUTIONS[class_id] = resolutions
@@ -260,7 +273,11 @@ def process_item(item, training, transforms=[[]]):
     for transform in transforms:
 
         force_manipulation = 'manipulation' in transform
-        force_orientation  = 'orientation'  in transform
+
+        if ('orientation' in transform) and (ORIENTATION_FLIP_ALLOWED[class_idx] is False):
+            continue
+
+        force_orientation  = ('orientation'  in transform) and ORIENTATION_FLIP_ALLOWED[class_idx]
 
         # some images are landscape, others are portrait, so augment training by randomly changing orientation
         if ((np.random.rand() < 0.5) and training) or force_orientation:
@@ -322,8 +339,6 @@ def gen(items, batch_size, training=True):
 
     transforms = VALIDATION_TRANSFORMS if validation else [[]]
 
-    assert batch_size % len(transforms) == 0 # will fix if unconvenient
-
     while True:
 
         if training:
@@ -346,6 +361,9 @@ def gen(items, batch_size, training=True):
                         for _X,_O,_y in zip(*batch_result):
                             X[batch_idx], O[batch_idx], y[batch_idx] = _X,_O,_y
                             batch_idx += 1
+                            if batch_idx == batch_size:
+                                yield([X, O], [y])
+                                batch_idx = 0
 
                 if batch_idx == batch_size:
                     yield([X, O], [y])
@@ -493,7 +511,11 @@ if not (args.test or args.test_train):
         ids_train = ids
         ids_val   = [ ]
 
-        extra_train_ids = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n')) for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'good_jpgs'))]
+        extra_train_ids = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n')) \
+            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'good_jpgs'))]
+        low_quality =     [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'low-quality'))]
+        extra_train_ids = [idx for idx in extra_train_ids if idx not in low_quality]
         extra_train_ids.sort()
         ids_train.extend(extra_train_ids)
 
