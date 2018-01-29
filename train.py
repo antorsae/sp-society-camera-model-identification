@@ -67,7 +67,7 @@ parser.add_argument('-t', '--test', action='store_true', help='Test model and ge
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, help='Factor of extra crops to sample during test, especially useful when crop size is less than 512, e.g. -tcs 4')
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
-parser.add_argument('-cc', '--center-crops', action='store_true', help='Train on center crops only (not random crops)')
+parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
@@ -83,13 +83,6 @@ parser.add_argument('-tta', action='store_true', help='Enable test time augmenta
 
 args = parser.parse_args()
 
-TRAIN_FOLDER       = 'train'
-EXTRA_TRAIN_FOLDER = 'flickr_images'
-EXTRA_VAL_FOLDER   = 'val_images'
-TEST_FOLDER        = 'test'
-MODEL_FOLDER       = 'models'
-
-CROP_SIZE = args.crop_size
 CLASSES = [
     'HTC-1-M7',
     'iPhone-6',     
@@ -114,6 +107,19 @@ EXTRA_CLASSES = [
     'samsung_note3',
     'sony_nex7'
 ]
+
+N_CLASSES = len(CLASSES)
+
+if args.center_crops==[-1]:
+    args.center_crops = range(N_CLASSES)
+
+TRAIN_FOLDER       = 'train'
+EXTRA_TRAIN_FOLDER = 'flickr_images'
+EXTRA_VAL_FOLDER   = 'val_images'
+TEST_FOLDER        = 'test'
+MODEL_FOLDER       = 'models'
+
+CROP_SIZE = args.crop_size
 
 RESOLUTIONS = {
     0: [[1520,2688]], # htc_m7          flips
@@ -148,7 +154,6 @@ for class_id,resolutions in RESOLUTIONS.copy().items():
 
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
 
-N_CLASSES = len(CLASSES)
 load_img_fast_jpg  = lambda img_path: jpeg.JPEG(img_path).decode()
 load_img           = lambda img_path: np.array(Image.open(img_path))
 
@@ -295,7 +300,7 @@ def process_item(item, training, transforms=[[]]):
         else:
             img = _img
 
-        img = get_crop(img, CROP_SIZE * 2, random_crop=(not args.center_crops) if training else False) 
+        img = get_crop(img, CROP_SIZE * 2, random_crop=(class_idx not in args.center_crops) if training else False) 
         # * 2 bc may need to scale by 0.5x and still get a 512px crop
 
         if args.verbose:
@@ -308,7 +313,7 @@ def process_item(item, training, transforms=[[]]):
             if args.verbose:
                 print("am: ", img.shape, item)
 
-        img = get_crop(img, CROP_SIZE, random_crop=(not args.center_crops) if training else False)
+        img = get_crop(img, CROP_SIZE, random_crop=(class_idx not in args.center_crops) if training else False)
         if args.verbose:
             print("ac: ", img.shape, item)
 
@@ -509,8 +514,7 @@ else:
         '_dol' + str(args.dropout_last) + \
         '_' + args.pooling + \
         ('_x' if args.extra_dataset else '') + \
-        ('_cc' if args.center_crops else '') 
-
+        ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') 
 
     print("Model name: " + model_name)
 
