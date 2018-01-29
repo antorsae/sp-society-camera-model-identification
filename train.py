@@ -64,6 +64,7 @@ parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout r
 parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help='Dropout rate for classifier')
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
+parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, help='Factor of extra crops to sample during test, especially useful when crop size is less than 512, e.g. -tcs 4')
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
 parser.add_argument('-cc', '--center-crops', action='store_true', help='Train on center crops only (not random crops)')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
@@ -639,8 +640,6 @@ else:
 
             original_manipulated = np.float32([1. if idx.find('manip') != -1 else 0.])
 
-            sx = img.shape[1] // CROP_SIZE
-            sy = img.shape[0] // CROP_SIZE
 
             if args.test and args.tta:
                 transforms = [[], ['orientation']]
@@ -649,8 +648,11 @@ else:
             else:
                 transforms = [[]]
 
-            img_batch         = np.zeros((len(transforms)* sx * sy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-            manipulated_batch = np.zeros((len(transforms)* sx * sy, 1),  dtype=np.float32)
+            ssx = int(img.shape[1] / CROP_SIZE * args.test_crop_supersampling)
+            ssy = int(img.shape[0] / CROP_SIZE * args.test_crop_supersampling)
+
+            img_batch         = np.zeros((len(transforms)* ssx * ssy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+            manipulated_batch = np.zeros((len(transforms)* ssx * ssy, 1),  dtype=np.float32)
 
             i = 0
             for transform in transforms:
@@ -666,12 +668,12 @@ else:
                 if args.test_train:
                     img = get_crop(img, 512, random_crop=False)
 
-                sx = img.shape[1] // CROP_SIZE
-                sy = img.shape[0] // CROP_SIZE
+                sx = img.shape[1] / CROP_SIZE
+                sy = img.shape[0] / CROP_SIZE
 
-                for x in range(sx):
-                    for y in range(sy):
-                        _img = np.copy(img[y*CROP_SIZE:(y+1)*CROP_SIZE, x*CROP_SIZE:(x+1)*CROP_SIZE])
+                for x in np.linspace(0, img.shape[1] - CROP_SIZE, args.test_crop_supersampling * sx, dtype=np.int64):
+                    for y in np.linspace(0, img.shape[0] - CROP_SIZE, args.test_crop_supersampling * sy, dtype=np.int64):
+                        _img = np.copy(img[y:y+CROP_SIZE, x:x+CROP_SIZE])
                         img_batch[i]         = preprocess_image(_img)
                         manipulated_batch[i] = manipulated
                         i += 1
