@@ -60,7 +60,8 @@ parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('-m', '--model', help='load hdf5 model including weights (and continue training)')
 parser.add_argument('-w', '--weights', help='load hdf5 weights only (and continue training)')
-parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout rate for FC layers')
+parser.add_argument('-do', '--dropout',    type=float, default=0.3, help='Dropout rate for first FC layer')
+parser.add_argument('-dol', '--dropout-last', type=float, default=0.1, help='Dropout rate for last FC layer')
 parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help='Dropout rate for classifier')
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
@@ -70,6 +71,7 @@ parser.add_argument('-cc', '--center-crops', action='store_true', help='Train on
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
+parser.add_argument('-fc', '--fully-connected-layers', nargs='+', type=int, default=[512,256], help='Specify FC layers after classifier, e.g. -fc 1024 512 256')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='Add a trainable kernel filter before classifier')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
@@ -490,19 +492,26 @@ else:
         x = Dropout(args.dropout_classifier, name='dropout_classifier')(x)
     x = concatenate([x, manipulated])
     if not args.no_fcs:
-        x = Dense(512, activation='relu', name='fc1')(x)
-        x = Dropout(args.dropout,         name='dropout_fc1')(x)
-        x = Dense(128, activation='relu', name='fc2')(x)
-        x = Dropout(args.dropout,         name='dropout_fc2')(x)
+        dropouts = np.linspace( args.dropout,  args.dropout_last, len(args.fully_connected_layers))
+        for i, (fc_layer, dropout) in enumerate(zip(args.fully_connected_layers, dropouts)):
+            x = Dense(fc_layer, activation='relu', name='fc{}'.format(i))(x)
+            x = Dropout(dropout,                   name='dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
     model_name = args.classifier + \
+        ('_fc{}'.format('-'.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '_nofc') + \
         ('_kf' if args.kernel_filter else '') + \
         ('_lkf' if args.learn_kernel_filter else '') + \
-        '_do' + str(args.dropout) + \
+        '_do'  + str(args.dropout) + \
+        '_dol' + str(args.dropout_last) + \
         '_doc' + str(args.dropout_classifier) + \
-        '_' + args.pooling
+        '_' + args.pooling + \
+        ('_x' if args.extra_dataset else '') + \
+        ('_cc' if args.center_crops else '') 
+
+
+    print("Model name: " + model_name)
 
     if args.weights:
             model.load_weights(args.weights, by_name=True, skip_mismatch=True)
