@@ -500,12 +500,13 @@ else:
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
     model_name = args.classifier + \
+        '_cs{}'.format(args.crop_size) + \
         ('_fc{}'.format(','.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '_nofc') + \
         ('_kf' if args.kernel_filter else '') + \
         ('_lkf' if args.learn_kernel_filter else '') + \
+        '_doc' + str(args.dropout_classifier) + \
         '_do'  + str(args.dropout) + \
         '_dol' + str(args.dropout_last) + \
-        '_doc' + str(args.dropout_classifier) + \
         '_' + args.pooling + \
         ('_x' if args.extra_dataset else '') + \
         ('_cc' if args.center_crops else '') 
@@ -518,12 +519,24 @@ else:
             match = re.search(r'([,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
             last_epoch = int(match.group(2))
 
-def print_distribution(ids, classes=None):
+def print_distribution(ids, classes=None, prediction_probabilities=None):
     if classes is None:
         classes = [get_class(idx.split('/')[-2]) for idx in ids]
+    classes=np.array(classes)
     classes_count = np.bincount(classes)
-    for class_name, class_count in zip(CLASSES, classes_count):
-        print('{:>22}: {:5d} ({:04.1f}%)'.format(class_name, class_count, 100. * class_count / len(classes)))
+    threshold = 0.7
+    poor_prediction_probabilities = 0
+    for class_idx, (class_name, class_count) in enumerate(zip(CLASSES, classes_count)):
+        if prediction_probabilities is not None:
+            prediction_probabilities_this_class = prediction_probabilities[classes == class_idx, class_idx]
+            poor_prediction_probabilities_this_class = (prediction_probabilities_this_class < threshold ).sum()
+            poor_prediction_probabilities += poor_prediction_probabilities_this_class
+            poor_prediction_probabilities_this_class /= prediction_probabilities_this_class.size
+        print('{:>22}: {:5d} ({:04.1f}%)'.format(class_name, class_count, 100. * class_count / len(classes)) + \
+            (' Poor predictions: {:04.1f}%'.format(100 * poor_prediction_probabilities_this_class) if prediction_probabilities is not None else ''))
+    if prediction_probabilities is not None:
+        print("                                Total poor predictions: {:04.1f}% (threshold = {:03.1f})".format( \
+            100. * poor_prediction_probabilities / classes.size, threshold))
 
 model.summary()
 model = multi_gpu_model(model, gpus=args.gpus)
@@ -709,13 +722,13 @@ else:
             print("Accuracy: " + str(correct_predictions / (len(transforms) * i)))
 
         if args.test:
+            prediction_probabilities = np.squeeze(np.array(prediction_probabilities))
             print("Test set predictions distribution:")
-            print_distribution(None, classes=classes)
+            print_distribution(None, classes=classes, prediction_probabilities=prediction_probabilities)
             print("Predictions as per old-school model inference:")
             print("kg submit {}".format(csv_name))
 
             items_per_class = len(prediction_probabilities) // N_CLASSES # it works b/c test dataset length is divisible by N_CLASSES
-            prediction_probabilities = np.squeeze(np.array(prediction_probabilities))
 
             csv_name  = 'submission_' + model_name + '_by_probability.csv'
             with open(csv_name, 'w') as csvfile:
