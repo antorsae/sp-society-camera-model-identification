@@ -65,6 +65,7 @@ parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
+parser.add_argument('-cc', '--center-crops', action='store_true', help='Train on center crops only (not random crops)')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
@@ -112,17 +113,16 @@ EXTRA_CLASSES = [
 ]
 
 RESOLUTIONS = {
-    0: [[1520,2688]], # flips
-    1: [[3264,2448]], # no flips
-    2: [[2432,4320]], # flips
-    3: [[3120,4160]], # flips
-    4: [[4128,2322]], # no flips
-    5: [[3264,2448]], # no flips
-    6: [[3024,4032]], # flips
-    7: [[1040,780],  # Motorola-Nexus-6 no flips
-        [3088,4130], [3120,4160]], # Motorola-Nexus-6 flips
-    8: [[4128,2322]], # no flips 
-    9: [[6000,4000]], # no flips
+    0: [[1520,2688]], # htc_m7          flips
+    1: [[2448,3264]], # iphone_6        no flips
+    2: [[2432,4320]], # moto_maxx       flips
+    3: [[3120,4160]], # moto_x          flips
+    4: [[2322,4128]], # samsung_s4      no flips
+    5: [[2448,3264]], # iphone 4s       no flips
+    6: [[3024,4032]], # nexus_5x        flips 3264x2448
+    7: [[780, 1040], [4130,3088], [4160, 3088], [4160, 3120], [3088,4160], [3120,4160]], # Motorola-Nexus-6 no flips
+    8: [[2322,4128]], # samsung_note3   no flips 
+    9: [[4000,6000]], # sony_nex7       no flips
 }
 
 ORIENTATION_FLIP_ALLOWED = [
@@ -133,13 +133,14 @@ ORIENTATION_FLIP_ALLOWED = [
     False,
     False,
     True,
-    True,
+    False,
     False,
     False
 ]
 
 for class_id,resolutions in RESOLUTIONS.copy().items():
-    resolutions.extend([resolution[::-1] for resolution in resolutions])
+    if ORIENTATION_FLIP_ALLOWED[class_id]:
+        resolutions.extend([resolution[::-1] for resolution in resolutions])
     RESOLUTIONS[class_id] = resolutions
 
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
@@ -255,6 +256,7 @@ def process_item(item, training, transforms=[[]]):
 
     # discard images that do not have right resolution
     if shape not in RESOLUTIONS[class_idx]:
+        #print(item)
         return None
 
     # some images may not be downloaded correctly and are B/W, discard those
@@ -290,7 +292,7 @@ def process_item(item, training, transforms=[[]]):
         else:
             img = _img
 
-        img = get_crop(img, CROP_SIZE * 2, random_crop=True if training else False) 
+        img = get_crop(img, CROP_SIZE * 2, random_crop=(not args.center_crops) if training else False) 
         # * 2 bc may need to scale by 0.5x and still get a 512px crop
 
         if args.verbose:
@@ -303,7 +305,7 @@ def process_item(item, training, transforms=[[]]):
             if args.verbose:
                 print("am: ", img.shape, item)
 
-        img = get_crop(img, CROP_SIZE, random_crop=True if training else False)
+        img = get_crop(img, CROP_SIZE, random_crop=(not args.center_crops) if training else False)
         if args.verbose:
             print("ac: ", img.shape, item)
 
@@ -342,6 +344,7 @@ def gen(items, batch_size, training=True):
 
     transforms = VALIDATION_TRANSFORMS if validation else [[]]
 
+    bad_items = set()
     while True:
 
         if training:
@@ -354,7 +357,7 @@ def gen(items, batch_size, training=True):
         for item_batch in iter(lambda:list(islice(iter_items, batch_size)), []):
 
             batch_results = p.map(process_item_func, item_batch)
-            for batch_result in batch_results:
+            for batch_result, item in zip(batch_results, item_batch):
 
                 if batch_result is not None:
                     if len(transforms) == 1:
@@ -367,10 +370,16 @@ def gen(items, batch_size, training=True):
                             if batch_idx == batch_size:
                                 yield([X, O], [y])
                                 batch_idx = 0
+                else: # if batch result is None
+                    bad_items.add(item)
 
                 if batch_idx == batch_size:
                     yield([X, O], [y])
                     batch_idx = 0
+
+        if len(bad_items) > 0:
+            print("\nRejected {} items: {}".format('trainining' if training else 'validation', len(bad_items)))
+            print(bad_items)
 
 def SmallNet(include_top, weights, input_shape, pooling):
     img_input = Input(shape=input_shape)
@@ -523,9 +532,12 @@ if not (args.test or args.test_train):
 
         extra_train_ids = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n')) \
             for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'good_jpgs'))]
-        low_quality =     [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
-            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'low-quality'))]
-        extra_train_ids = [idx for idx in extra_train_ids if idx not in low_quality]
+        low_quality     = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'low_quality'))]
+        bad_resolution  = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'bad_resolution'))]
+        reject_ids = low_quality + bad_resolution
+        extra_train_ids = [idx for idx in extra_train_ids if idx not in reject_ids]
         extra_train_ids.sort()
         ids_train.extend(extra_train_ids)
         random.shuffle(ids_train)
@@ -554,6 +566,7 @@ if not (args.test or args.test_train):
 
     print("Validation set distribution:")
     print_distribution(ids_val)
+    print("Total training items: {}\nTotal validation items: {}".format(len(ids_train), len(ids_val)))
 
     classes_train = [get_class(idx.split('/')[-2]) for idx in ids_train]
     class_weight = class_weight.compute_class_weight('balanced', np.unique(classes_train), classes_train)
@@ -583,7 +596,8 @@ if not (args.test or args.test_train):
             generator        = gen(ids_train, args.batch_size),
             steps_per_epoch  = int(math.ceil(len(ids_train)  // args.batch_size)),
             validation_data  = gen(ids_val, args.batch_size, training = False),
-            validation_steps = int(len(VALIDATION_TRANSFORMS) * math.ceil(len(ids_val) // args.batch_size)),
+            validation_steps = int(len(VALIDATION_TRANSFORMS) * (sum(ORIENTATION_FLIP_ALLOWED) / len(ORIENTATION_FLIP_ALLOWED) ) \
+                                   * math.ceil(len(ids_val) // args.batch_size)), # the sum/len factors that some transforms will not be done
             epochs = args.max_epoch,
             callbacks = [save_checkpoint, reduce_lr],
             initial_epoch = last_epoch,
@@ -610,6 +624,7 @@ else:
             csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
             csv_writer.writerow(['fname','camera'])
             classes = []
+            prediction_probabilities = []
         else:
             correct_predictions = 0
 
@@ -677,6 +692,7 @@ else:
             if args.test:
                 csv_writer.writerow([idx.split('/')[-1], CLASSES[prediction_class_idx]])
                 classes.append(prediction_class_idx)
+                prediction_probabilities.append(prediction)
 
         if args.test_train:
             print("Accuracy: " + str(correct_predictions / (len(transforms) * i)))
@@ -684,5 +700,23 @@ else:
         if args.test:
             print("Test set predictions distribution:")
             print_distribution(None, classes=classes)
-            print("Now you are ready to:")
+            print("Predictions as per old-school model inference:")
             print("kg submit {}".format(csv_name))
+
+            items_per_class = len(prediction_probabilities) // N_CLASSES # it works b/c test dataset length is divisible by N_CLASSES
+            prediction_probabilities = np.squeeze(np.array(prediction_probabilities))
+
+            csv_name  = 'submission_' + model_name + '_by_probability.csv'
+            with open(csv_name, 'w') as csvfile:
+                csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
+                csv_writer.writerow(['fname','camera'])
+
+                for class_idx in range(N_CLASSES):
+                    largest_idx = np.argpartition(prediction_probabilities[:,class_idx], -items_per_class)[-items_per_class:]
+                    prediction_probabilities[largest_idx] = 0.
+                    ids_by_class = [ids[largest_id] for largest_id in largest_idx]
+                    for largest_id in ids_by_class:
+                        csv_writer.writerow([largest_id.split('/')[-1], CLASSES[class_idx]])
+            print("Predictions assuming flat probability distribution on test dataset:")
+            print("kg submit {}".format(csv_name))
+            csvfile.close()
