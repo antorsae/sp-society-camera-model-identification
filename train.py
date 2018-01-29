@@ -463,7 +463,7 @@ if args.model:
 
     model = load_model(args.model, compile=False)
     # e.g. DenseNet201_do0.3_doc0.0_avg-epoch128-val_acc0.964744.hdf5
-    match = re.search(r'(([a-zA-Z0-9]+)_[A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
+    match = re.search(r'(([a-zA-Z0-9]+)_[,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
     model_name = match.group(1)
     args.classifier = match.group(2)
     CROP_SIZE = args.crop_size  = model.get_input_shape_at(0)[0][1]
@@ -500,7 +500,7 @@ else:
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
     model_name = args.classifier + \
-        ('_fc{}'.format('-'.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '_nofc') + \
+        ('_fc{}'.format(','.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '_nofc') + \
         ('_kf' if args.kernel_filter else '') + \
         ('_lkf' if args.learn_kernel_filter else '') + \
         '_do'  + str(args.dropout) + \
@@ -515,7 +515,7 @@ else:
 
     if args.weights:
             model.load_weights(args.weights, by_name=True, skip_mismatch=True)
-            match = re.search(r'([A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
+            match = re.search(r'([,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.weights)
             last_epoch = int(match.group(2))
 
 def print_distribution(ids, classes=None):
