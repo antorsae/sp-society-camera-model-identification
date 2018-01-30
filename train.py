@@ -55,31 +55,40 @@ random.seed(SEED)
 # TODO tf seed
 
 parser = argparse.ArgumentParser()
+# general
 parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
 parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
+parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
+parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
+
+# architecture/model
 parser.add_argument('-m', '--model', help='load hdf5 model including weights (and continue training)')
 parser.add_argument('-w', '--weights', help='load hdf5 weights only (and continue training)')
 parser.add_argument('-do', '--dropout',    type=float, default=0.3, help='Dropout rate for first FC layer')
 parser.add_argument('-dol', '--dropout-last', type=float, default=0.1, help='Dropout rate for last FC layer')
 parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help='Dropout rate for classifier')
-parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
-parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
-parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, help='Factor of extra crops to sample during test, especially useful when crop size is less than 512, e.g. -tcs 4')
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
-parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
-parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
 parser.add_argument('-fc', '--fully-connected-layers', nargs='+', type=int, default=[512,256], help='Specify FC layers after classifier, e.g. -fc 1024 512 256')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='Add a trainable kernel filter before classifier')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
+parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
+parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
+
+# dataset (training)
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
-parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
-parser.add_argument('-e', '--ensembling', type=str, default='arithmetic', help='Type of ensembling: arithmetic|geometric for TTA')
+
+# test
+parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
+parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
+parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, help='Factor of extra crops to sample during test, especially useful when crop size is less than 512, e.g. -tcs 4')
 parser.add_argument('-tta', action='store_true', help='Enable test time augmentation')
+parser.add_argument('-e', '--ensembling', type=str, default='arithmetic', help='Type of ensembling: arithmetic|geometric for TTA')
+
 
 args = parser.parse_args()
 
@@ -606,6 +615,13 @@ if not (args.test or args.test_train):
         def loss(y_true, y_pred):
             return K.mean(K.square(y_pred - y_true) - K.square(y_true - noise), axis=-1)
         return loss
+
+    if args.freeze_classifier:
+        for layer in model.layers:
+            if isinstance(layer, Model):
+                print("Freezing weights for classifier {}".format(layer.name))
+                for classifier_layer in layer.layers:
+                    classifier_layer.trainable = False
 
     model.compile(optimizer=opt, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
 
