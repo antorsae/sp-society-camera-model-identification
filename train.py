@@ -68,16 +68,21 @@ parser.add_argument('-w', '--weights', help='load hdf5 weights only (and continu
 parser.add_argument('-do', '--dropout',    type=float, default=0.3, help='Dropout rate for first FC layer')
 parser.add_argument('-dol', '--dropout-last', type=float, default=0.1, help='Dropout rate for last FC layer')
 parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help='Dropout rate for classifier')
-parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
-parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
 parser.add_argument('-fc', '--fully-connected-layers', nargs='+', type=int, default=[512,256], help='Specify FC layers after classifier, e.g. -fc 1024 512 256')
+parser.add_argument('-bn', '--batch-normalization', action='store_true', help='Use batch normalization in FC layers')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='Add a trainable kernel filter before classifier')
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
-parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
+
+# training regime
+parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
+parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
+parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use orientation flips for augmentation')
+parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
+
 
 # dataset (training)
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
@@ -130,30 +135,35 @@ MODEL_FOLDER       = 'models'
 
 CROP_SIZE = args.crop_size
 
-RESOLUTIONS = {
-    0: [[1520,2688]], # htc_m7          flips
+RESOLUTIONS = {       # model                    org   flipped
+    0: [[2688,1520]], # htc_m7          flips:   508 / 42
     1: [[2448,3264]], # iphone_6        no flips
-    2: [[2432,4320]], # moto_maxx       flips
-    3: [[3120,4160]], # moto_x          flips
-    4: [[2322,4128]], # samsung_s4      no flips
+    2: [[2432,4320]], # moto_maxx       flips    472 / 78
+    3: [[3120,4160]], # moto_x          flips    468 / 82
+    4: [[2322,4128]], # samsung_s4      no flips 
     5: [[2448,3264]], # iphone 4s       no flips
-    6: [[3024,4032]], # nexus_5x        flips 3264x2448
-    7: [[780, 1040], [4130,3088], [4160, 3088], [4160, 3120], [3088,4160], [3120,4160]], # Motorola-Nexus-6 no flips
+    6: [[4032,3024]], # nexus_5x        flips    544 /  6
+    7: [[780, 1040],  # Motorola-Nexus-6         2
+        [4130,3088],  #                          2
+        [4160,3088],  #                  30
+        [4160,3120],  #                  256
+        [3088,4160],  #                  18
+        [3120,4160]], #                  242
     8: [[2322,4128]], # samsung_note3   no flips 
     9: [[4000,6000]], # sony_nex7       no flips
 }
 
 ORIENTATION_FLIP_ALLOWED = [
-    True,
-    False,
-    True,
-    True,
-    False,
-    False,
-    True,
-    False,
-    False,
-    False
+    True,  # htc_m7
+    False, # iphone_6
+    True,  # moto_maxx
+    True,  # moto_x
+    False, # samsung_s4
+    False, # iphone 4s   
+    True,  # nexus_5x
+    False, # Motorola-Nexus-6
+    False, # samsung_note3
+    False  # sony_nex7
 ]
 
 for class_id,resolutions in RESOLUTIONS.copy().items():
@@ -293,13 +303,13 @@ def process_item(item, training, transforms=[[]]):
 
         force_manipulation = 'manipulation' in transform
 
-        if ('orientation' in transform) and (ORIENTATION_FLIP_ALLOWED[class_idx] is False):
+        if args.no_flips and (('orientation' in transform) and (ORIENTATION_FLIP_ALLOWED[class_idx] is False)):
             continue
 
-        force_orientation  = ('orientation'  in transform) and ORIENTATION_FLIP_ALLOWED[class_idx]
+        force_orientation  = not args.no_flips and ('orientation'  in transform) and ORIENTATION_FLIP_ALLOWED[class_idx] 
 
         # some images are landscape, others are portrait, so augment training by randomly changing orientation
-        if ((np.random.rand() < 0.5) and training and ORIENTATION_FLIP_ALLOWED[class_idx]) or force_orientation:
+        if not args.no_flips and ((((np.random.rand() < 0.5) and training and ORIENTATION_FLIP_ALLOWED[class_idx])) or force_orientation):
             img = np.rot90(_img, 1, (0,1))
             # is it rot90(..3..), rot90(..1..) or both? 
             # for phones with landscape mode pics could be taken upside down too, although less likely
@@ -477,7 +487,7 @@ if args.model:
 
     model = load_model(args.model, compile=False)
     # e.g. DenseNet201_do0.3_doc0.0_avg-epoch128-val_acc0.964744.hdf5
-    match = re.search(r'(([a-zA-Z0-9]+)_[,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
+    match = re.search(r'(([a-zA-Z\d]+)_cs[,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
     model_name = match.group(1)
     args.classifier = match.group(2)
     CROP_SIZE = args.crop_size  = model.get_input_shape_at(0)[0][1]
@@ -508,7 +518,12 @@ else:
     if not args.no_fcs:
         dropouts = np.linspace( args.dropout,  args.dropout_last, len(args.fully_connected_layers))
         for i, (fc_layer, dropout) in enumerate(zip(args.fully_connected_layers, dropouts)):
-            x = Dense(fc_layer, activation='relu', name='fc{}'.format(i))(x)
+            if args.batch_normalization:
+                x = Dense(fc_layer,    name='fc{}'.format(i))(x)
+                x = BatchNormalization(name='bn{}'.format(i))(x)
+                x = Activation('relu', name='relu{}'.format(i))(x)
+            else:
+                x = Dense(fc_layer, activation='relu', name='fc{}'.format(i))(x)
             x = Dropout(dropout,                   name='dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
@@ -516,6 +531,7 @@ else:
     model_name = args.classifier + \
         '_cs{}'.format(args.crop_size) + \
         ('_fc{}'.format(','.join([str(fc) for fc in args.fully_connected_layers])) if not args.no_fcs else '_nofc') + \
+        ('_bn' if args.batch_normalization else '') + \
         ('_kf' if args.kernel_filter else '') + \
         ('_lkf' if args.learn_kernel_filter else '') + \
         '_doc' + str(args.dropout_classifier) + \
@@ -523,7 +539,8 @@ else:
         '_dol' + str(args.dropout_last) + \
         '_' + args.pooling + \
         ('_x' if args.extra_dataset else '') + \
-        ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') 
+        ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
+        ('_nf' if args.no_flips else '') 
 
     print("Model name: " + model_name)
 
@@ -635,12 +652,14 @@ if not (args.test or args.test_train):
 
     reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
 
+    orientation_flip_augmentation_factor = (sum(ORIENTATION_FLIP_ALLOWED) / len(ORIENTATION_FLIP_ALLOWED)) if not args.no_flips else 0.5
+
     model.fit_generator(
             generator        = gen(ids_train, args.batch_size),
             steps_per_epoch  = int(math.ceil(len(ids_train)  // args.batch_size)),
             validation_data  = gen(ids_val, args.batch_size, training = False),
-            validation_steps = int(len(VALIDATION_TRANSFORMS) * (sum(ORIENTATION_FLIP_ALLOWED) / len(ORIENTATION_FLIP_ALLOWED) ) \
-                                   * math.ceil(len(ids_val) // args.batch_size)), # the sum/len factors that some transforms will not be done
+            validation_steps = int(len(VALIDATION_TRANSFORMS) * orientation_flip_augmentation_factor  \
+                                   * math.ceil(len(ids_val) // args.batch_size)),
             epochs = args.max_epoch,
             callbacks = [save_checkpoint, reduce_lr],
             initial_epoch = last_epoch,
@@ -724,7 +743,7 @@ else:
             if prediction.shape[0] != 1: # TTA
                 if args.ensembling == 'geometric':
                     predictions = np.log(prediction + K.epsilon()) # avoid numerical instability log(0)
-                prediction = np.sum(prediction, axis=0)
+                prediction = np.mean(prediction, axis=0)
 
             prediction_class_idx = np.argmax(prediction)
 
@@ -761,6 +780,6 @@ else:
                     ids_by_class = [ids[largest_id] for largest_id in largest_idx]
                     for largest_id in ids_by_class:
                         csv_writer.writerow([largest_id.split('/')[-1], CLASSES[class_idx]])
-            print("Predictions assuming flat probability distribution on test dataset:")
+            print("Predictions assuming prior flat probability distribution on test dataset:")
             print("kg submit {}".format(csv_name))
             csvfile.close()
