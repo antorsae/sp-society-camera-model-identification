@@ -57,10 +57,12 @@ random.seed(SEED)
 parser = argparse.ArgumentParser()
 # general
 parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
-parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
-parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
 parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
+parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
+parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
+parser.add_argument('-o', '--optimizer', type=str, default='adam', help='Optimizer to use in training -o adam|sgd|adadelta')
+parser.add_argument('--amsgrad', action='store_true', default=False, help='Apply the AMSGrad variant of adam|adadelta from the paper "On the Convergence of Adam and Beyond".')
 
 # architecture/model
 parser.add_argument('-m', '--model', help='load hdf5 model including weights (and continue training)')
@@ -82,7 +84,6 @@ parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use orientation flips for augmentation')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
-
 
 # dataset (training)
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
@@ -624,8 +625,14 @@ if not (args.test or args.test_train):
     classes_train = [get_class(idx.split('/')[-2]) for idx in ids_train]
     class_weight = class_weight.compute_class_weight('balanced', np.unique(classes_train), classes_train)
 
-    opt = Adam(lr=args.learning_rate)
-    #opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
+    if args.optimizer == 'adam':
+        opt = Adam(lr=args.learning_rate, amsgrad=args.amsgrad)
+    elif args.optimizer == 'sgd':
+        opt = SGD(lr=args.learning_rate, decay=1e-6, momentum=0.9, nesterov=True)
+    elif args.optimizer == 'adadelta':
+        opt = Adadelta(lr=args.learning_rate, amsgrad=args.amsgrad)
+    else:
+        assert False
 
     # TODO: implement this correctly.
     def weighted_loss(weights):
@@ -773,8 +780,8 @@ else:
             with open(csv_name, 'w') as csvfile:
                 csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
                 csv_writer.writerow(['fname','camera'])
-
-                for class_idx in range(N_CLASSES):
+                sum_prediction_probabilities_by_class = np.sum(prediction_probabilities, axis=(0,))
+                for class_idx in np.argsort(sum_prediction_probabilities_by_class)[::-1]:
                     largest_idx = np.argpartition(prediction_probabilities[:,class_idx], -items_per_class)[-items_per_class:]
                     prediction_probabilities[largest_idx] = 0.
                     ids_by_class = [ids[largest_id] for largest_id in largest_idx]
