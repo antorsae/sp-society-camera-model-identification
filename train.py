@@ -142,27 +142,39 @@ MODEL_FOLDER       = 'models'
 
 CROP_SIZE = args.crop_size
 
+# See motivsation for this:
+# https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/48680
+# and http://sylvana.net/jpegcrop/exif_orientation.html
+#
+# These are resolutions, and probabilities are from the original training set;
+#
 #       [size_y, size_x, probability]. Sum of probabilites for each model should add up to 1. 
-RESOLUTIONS = {                # samples*2  model
-    0: [[2688,1520, 508/550],  # 508        htc_m7 
+#
+RESOLUTIONS = {                # samples*2  model      samples   EXIF orientation
+#
+    0: [[2688,1520, 508/550],  # 508        htc_m7         275   Orientation: TopLeft
         [1520,2688,  42/550]], #  42
-    1: [[2448,3264,       1]], # 550        iphone_6
-    2: [[2432,4320, 472/550],  # 472        moto_maxx
+    1: [[2448,3264,       1]], # 550        iphone_6       273   Orientation: RightTop
+                               #                             2   Orientation: TopLeft    
+    2: [[2432,4320, 472/550],  # 472        moto_maxx      275   Orientation: Undefined
         [4320,2432,  78/550]], #  78 
-    3: [[3120,4160, 468/550],  # 468        moto_x
+    3: [[3120,4160, 468/550],  # 468        moto_x         275   Orientation: Undefined
         [4160,3120,  82/550]], #  82
-    4: [[2322,4128,       1]], # 550        samsung_s4
-    5: [[2448,3264,       1]], # 550        iphone 4s
-    6: [[4032,3024, 544/550],  # 544        nexus_5x
+    4: [[2322,4128,       1]], # 550        samsung_s4     275   Orientation: RightTop
+    5: [[2448,3264,       1]], # 550        iphone 4s      275   Orientation: RightTop
+    6: [[4032,3024, 544/550],  # 544        nexus_5x       275   Orientation: Undefined
         [3024,4032,   6/550]], #   6 
-    7: [[780, 1040,   2/550],  #   2
-        [4130,3088,   2/550],  #   2
+    7: [[780, 1040,   2/550],  #   2        nexus_6          1   Orientation: LeftBottom
+        [4130,3088,   2/550],  #   2                       274   Orientation: TopLeft
         [4160,3088,  30/550],  #  30
         [4160,3120, 256/550],  # 256
         [3088,4160,  18/550],  #  18
         [3120,4160, 242/550]], # 242
-    8: [[2322,4128,       1]], # 550        samsung_note3 
-    9: [[4000,6000,       1]], # 550        sony_nex7
+    8: [[2322,4128,       1]], # 550        samsung_note3  196   Orientation: RightTop
+                               #                            79   Orientation: TopLeft
+    9: [[4000,6000,       1]], # 550        sony_nex7       35   Orientation: LeftBottom
+                               #                             3   Orientation: RightTop
+                               #                           237   Orientation: TopLeft
 }
 
 ORIENTATION_FLIP_ALLOWED = [
@@ -309,7 +321,6 @@ def process_item(item, training, transforms=[[]]):
 
     # discard images that do not have right resolution
     if shape not in [resolution[:2] for resolution in RESOLUTIONS[class_idx]]:
-        #print(item)
         return None
 
     # some images may not be downloaded correctly and are B/W, discard those
@@ -344,6 +355,15 @@ def process_item(item, training, transforms=[[]]):
             # and img_4df3673_manip img_6a31fd7_unalt looks 2!
         else:
             img = _img
+
+        # TESTING
+        # Correct orientstion for Nexus 5
+        if (class_idx == 6):
+            canonical_resolution = tuple(RESOLUTIONS[class_idx][0][:2])
+            if img.shape[:2] != canonical_resolution:
+                img = np.rot90(img, 1, (0,1))
+                assert img.shape[:2] == canonical_resolution
+ 
 
         img = get_crop(img, CROP_SIZE * 2, random_crop=(class_idx not in args.center_crops) if training else False) 
         # * 2 bc may need to scale by 0.5x and still get a 512px crop
