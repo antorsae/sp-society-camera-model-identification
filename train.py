@@ -23,6 +23,7 @@ from keras.utils import to_categorical
 from keras.applications import *
 from keras import backend as K
 from keras.engine.topology import Layer
+import keras.losses
 
 from keras_squeeze_excite_network import * 
 
@@ -51,6 +52,8 @@ from itertools import  islice
 from conditional import conditional
 
 from clr_callback import *
+from collections import defaultdict
+import copy
 
 SEED = 42
 
@@ -77,6 +80,7 @@ parser.add_argument('-dol', '--dropout-last', type=float, default=0.1, help='Dro
 parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help='Dropout rate for classifier')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
 parser.add_argument('-fc', '--fully-connected-layers', nargs='+', type=int, default=[512,256], help='Specify FC layers after classifier, e.g. -fc 1024 512 256')
+parser.add_argument('-fca', '--fully-connected-activation', type=str, default='relu', help='Activation function to use in FC layers, e.g. -fca relu|selu|prelu|leakyrelu|elu|...')
 parser.add_argument('-bn', '--batch-normalization', action='store_true', help='Use batch normalization in FC layers')
 parser.add_argument('-kf', '--kernel-filter', action='store_true', help='Apply kernel filter')
 parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='Add a trainable kernel filter before classifier')
@@ -90,7 +94,8 @@ parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use orientation flips for augmentation')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
-
+parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
+parser.add_argument('-xl', '--experimental-loss', action='store_true', help='Use experimental loss to get flat class probabily distribution on predictions')
 # dataset (training)
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
 
@@ -197,6 +202,7 @@ ORIENTATION_FLIP_ALLOWED = [
 #    RESOLUTIONS[class_id] = resolutions
 
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
+N_MANIPULATIONS = len(MANIPULATIONS)
 
 load_img_fast_jpg  = lambda img_path: jpeg.JPEG(img_path).decode()
 load_img           = lambda img_path: np.array(Image.open(img_path))
@@ -224,7 +230,7 @@ def random_manipulation(img, manipulation=None):
         im_decoded = cv2.resize(img,(0,0), fx=scale, fy=scale, interpolation = cv2.INTER_CUBIC)
     else:
         assert False
-    return im_decoded
+    return im_decoded, MANIPULATIONS.index(manipulation)
 
 def preprocess_image(img):
     
@@ -246,7 +252,6 @@ def preprocess_image(img):
         classifier_to_module = { 
             'NASNetLarge'       : 'nasnet',
             'NASNetMobile'      : 'nasnet',
-            'DenseNet40'        : 'densenet',
             'DenseNet121'       : 'densenet',
             'DenseNet161'       : 'densenet',
             'DenseNet201'       : 'densenet',
@@ -332,9 +337,10 @@ def process_item(item, training, transforms=[[]]):
     else:
         _img = np.copy(img)
 
-        img_s         = [ ]
-        manipulated_s = [ ]
-        class_idx_s   = [ ]
+        img_s              = [ ]
+        manipulated_s      = [ ]
+        class_idx_s        = [ ]
+        manipulation_idx_s = [ ]
 
     for transform in transforms:
 
@@ -346,7 +352,8 @@ def process_item(item, training, transforms=[[]]):
         force_orientation  = not args.no_flips and ('orientation'  in transform) and ORIENTATION_FLIP_ALLOWED[class_idx] 
 
         # some images are landscape, others are portrait, so augment training by randomly changing orientation
-        if not args.no_flips and ((((np.random.rand() < 0.5) and training and ORIENTATION_FLIP_ALLOWED[class_idx])) or force_orientation):
+        if not args.no_flips and ((((np.random.rand() < 0.5) and training and ORIENTATION_FLIP_ALLOWED[class_idx])) or force_orientation) \
+           and (class_idx != 6): # TESTING: do not flip Nexus 5
             img = np.rot90(_img, 1, (0,1))
             # is it rot90(..3..), rot90(..1..) or both? 
             # for phones with landscape mode pics could be taken upside down too, although less likely
@@ -357,7 +364,7 @@ def process_item(item, training, transforms=[[]]):
             img = _img
 
         # TESTING
-        # Correct orientstion for Nexus 5
+        # Correct orientation for Nexus 5
         if (class_idx == 6):
             canonical_resolution = tuple(RESOLUTIONS[class_idx][0][:2])
             if img.shape[:2] != canonical_resolution:
@@ -372,8 +379,10 @@ def process_item(item, training, transforms=[[]]):
             print("om: ", img.shape, item)
 
         manipulated = 0.
+        manipulation_idx = -1 # why -1? b/c sparse_categorical_cross_entropy makes loss = 0 when y_true == -1
+
         if ((np.random.rand() < 0.5) and training) or force_manipulation:
-            img = random_manipulation(img)
+            img, manipulation_idx = random_manipulation(img)
             manipulated = 1.
             if args.verbose:
                 print("am: ", img.shape, item)
@@ -386,15 +395,18 @@ def process_item(item, training, transforms=[[]]):
         if args.verbose:
             print("ap: ", img.shape, item)
 
+        one_hot_class_idx = to_categorical(class_idx, N_CLASSES)
+
         if len(transforms) > 1:
             img_s.append(img)    
             manipulated_s.append(manipulated)
-            class_idx_s.append(class_idx)
+            class_idx_s.append(one_hot_class_idx)
+            manipulation_idx_s.append(manipulation_idx)
 
     if len(transforms) == 1:
-        return img, manipulated, class_idx
+        return img, manipulated, one_hot_class_idx, manipulation_idx
     else:
-        return img_s, manipulated_s, class_idx_s
+        return img_s, manipulated_s, class_idx_s, manipulation_idx_s
 
 VALIDATION_TRANSFORMS = [ [], ['orientation'], ['manipulation'], ['orientation','manipulation']]
 
@@ -411,44 +423,92 @@ def gen(items, batch_size, training=True):
     O = np.empty((batch_size * valid_batch_factor, 1), dtype=np.float32)
 
     # class index
-    y = np.empty((batch_size * valid_batch_factor), dtype=np.int64)
+    y = np.empty((batch_size * valid_batch_factor, N_CLASSES), dtype=np.float32)
     
+    if args.class_aware_sampling:
+        items_per_class = defaultdict(list)
+        for item in items:
+            class_idx = get_class(item.split('/')[-2])
+            items_per_class[class_idx].append(item)
+
+        items_per_class_running=copy.deepcopy(items_per_class)
+
     p = Pool(cpu_count()-2)
 
     transforms = VALIDATION_TRANSFORMS if validation else [[]]
 
     bad_items = set()
+    process_item_func  = partial(process_item, training=training, transforms=transforms)
+
     while True:
 
-        if training:
+        if training and not args.class_aware_sampling:
             random.shuffle(items)
 
-        process_item_func  = partial(process_item, training=training, transforms=transforms)
-
         batch_idx = 0
-        iter_items = iter(items)
-        for item_batch in iter(lambda:list(islice(iter_items, batch_size)), []):
 
-            batch_results = p.map(process_item_func, item_batch)
-            for batch_result, item in zip(batch_results, item_batch):
+        if args.class_aware_sampling:
+            class_index = 0
+            items_done = 0
+            while items_done < len(items):
+                item_batch = []
+                for _ in range(batch_size):
+                    random_class = class_index % N_CLASSES
+                    class_index += 1
+                    if len(items_per_class_running[random_class]) == 0:
+                        items_per_class_running[random_class]=copy.deepcopy(items_per_class[random_class])
+                        random.shuffle(items_per_class_running[random_class])
+                    item_batch.append(items_per_class_running[random_class].pop())
+                random.shuffle(item_batch)
 
-                if batch_result is not None:
-                    if len(transforms) == 1:
-                        X[batch_idx], O[batch_idx], y[batch_idx] = batch_result
-                        batch_idx += 1
-                    else:
-                        for _X,_O,_y in zip(*batch_result):
-                            X[batch_idx], O[batch_idx], y[batch_idx] = _X,_O,_y
+                batch_results = p.map(process_item_func, item_batch)
+                for batch_result, item in zip(batch_results, item_batch):
+
+                    # FIX DUP CODE START
+                    if batch_result is not None:
+                        if len(transforms) == 1:
+                            X[batch_idx], O[batch_idx], y[batch_idx], _ = batch_result
                             batch_idx += 1
-                            if batch_idx == batch_size:
-                                yield([X, O], [y])
-                                batch_idx = 0
-                else: # if batch result is None
-                    bad_items.add(item)
+                        else:
+                            for _X,_O,_y,__ in zip(*batch_result):
+                                X[batch_idx], O[batch_idx], y[batch_idx] = _X,_O,_y
+                                batch_idx += 1
+                                if batch_idx == batch_size:
+                                    yield([X, O], [y])
+                                    batch_idx = 0
+                    else: # if batch result is None
+                        bad_items.add(item)
 
-                if batch_idx == batch_size:
-                    yield([X, O], [y])
-                    batch_idx = 0
+                    if batch_idx == batch_size:
+                        yield([X, O], [y])
+                        batch_idx = 0
+                    # FIX DUP CODE END
+                items_done += batch_size
+        else:
+            iter_items = iter(items)
+            for item_batch in iter(lambda:list(islice(iter_items, batch_size)), []):
+                
+                batch_results = p.map(process_item_func, item_batch)
+                for batch_result in batch_results:
+                    # FIX DUP CODE START
+                    if batch_result is not None:
+                        if len(transforms) == 1:
+                            X[batch_idx], O[batch_idx], y[batch_idx], _ = batch_result
+                            batch_idx += 1
+                        else:
+                            for _X,_O,_y, __ in zip(*batch_result):
+                                X[batch_idx], O[batch_idx], y[batch_idx] = _X,_O,_y
+                                batch_idx += 1
+                                if batch_idx == batch_size:
+                                    yield([X, O], [y])
+                                    batch_idx = 0
+                    else: # if batch result is None
+                        bad_items.add(item)
+
+                    if batch_idx == batch_size:
+                        yield([X, O], [y])
+                        batch_idx = 0
+                    # FIX DUP CODE END
 
         if len(bad_items) > 0:
             print("\nRejected {} items: {}".format('trainining' if training else 'validation', len(bad_items)))
@@ -554,6 +614,7 @@ else:
         pooling=args.pooling if args.pooling != 'none' else None)
 
     x = input_image
+
     if args.learn_kernel_filter:
         x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(x)
     x = classifier_model(x)
@@ -569,7 +630,8 @@ else:
             x = BatchNormalization(name='bn_reduce_pooling{}'.format(it))(x)
             x = Activation('relu', name='relu_reduce_pooling{}'.format(it))(x)
         
-    x = Reshape((-1,))(x)
+    if x.shape.ndims > 2:
+        x = Reshape((-1,))(x)
     if args.dropout_classifier != 0.:
         x = Dropout(args.dropout_classifier, name='dropout_classifier')(x)
     x = concatenate([x, manipulated])
@@ -579,9 +641,9 @@ else:
             if args.batch_normalization:
                 x = Dense(fc_layer,    name='fc{}'.format(i))(x)
                 x = BatchNormalization(name='bn{}'.format(i))(x)
-                x = Activation('relu', name='relu{}'.format(i))(x)
+                x = Activation(args.fully_connected_activation, name='{}{}'.format(args.fully_connected_activation,i))(x)
             else:
-                x = Dense(fc_layer, activation='relu', name='fc{}'.format(i))(x)
+                x = Dense(fc_layer, activation=args.fully_connected_activation, name='fc{}'.format(i))(x)
             if dropout != 0:
                 x = Dropout(dropout,                   name='dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
@@ -660,7 +722,7 @@ if not (args.test or args.test_train):
 
         classes_val = [get_class(idx.split('/')[-2]) for idx in ids_val]
         classes_val_count = np.bincount(classes_val)
-        max_classes_val_count = max(classes_val_count)
+        max_classes_val_count = max(max(classes_val_count), args.batch_size//2)
 
         # Balance validation dataset by filling up classes with less items from training set (and removing those from there)
         for class_idx in range(N_CLASSES):
@@ -698,14 +760,24 @@ if not (args.test or args.test_train):
             return K.mean(K.square(y_pred - y_true) - K.square(y_true - noise), axis=-1)
         return loss
 
+    def categorical_crossentropy_and_variance(y_true, y_pred):
+        return K.categorical_crossentropy(y_true, y_pred) + 1000 * K.var(K.mean(y_pred, axis=0))
+
     if args.freeze_classifier:
         for layer in model.layers:
             if isinstance(layer, Model):
                 print("Freezing weights for classifier {}".format(layer.name))
+                print(layer)
                 for classifier_layer in layer.layers:
                     classifier_layer.trainable = False
 
-    model.compile(optimizer=opt, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    loss = 'categorical_crossentropy' if not args.experimental_loss else categorical_crossentropy_and_variance
+
+    # monkey-patch loss so model loads ok
+    # https://github.com/fchollet/keras/issues/5916#issuecomment-290344248
+    keras.losses.categorical_crossentropy_and_variance = categorical_crossentropy_and_variance
+
+    model.compile(optimizer=opt, loss=loss, metrics=['accuracy'])
 
     metric  = "-val_acc{val_acc:.6f}"
     monitor = 'val_acc'
@@ -740,7 +812,7 @@ if not (args.test or args.test_train):
             callbacks = callbacks,
             initial_epoch = last_epoch,
             max_queue_size = 10,
-            class_weight=class_weight)
+            class_weight=class_weight if not args.class_aware_sampling else None)
 
 else:
     # TEST
@@ -799,7 +871,7 @@ else:
                 if 'orientation' in transform:
                     img = np.rot90(img, 1, (0,1))
                 if 'manipulation' in transform and not original_manipulated:
-                    img = random_manipulation(img)
+                    img, manipulation_idx = random_manipulation(img)
                     manipulated = np.float32([1.])
 
                 if args.test_train:
