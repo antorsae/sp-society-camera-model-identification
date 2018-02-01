@@ -18,11 +18,13 @@ from keras.optimizers import Adam, Adadelta, SGD
 from keras.callbacks import ModelCheckpoint, ReduceLROnPlateau
 from keras.models import load_model, Model
 from keras.layers import concatenate, Lambda, Input, Dense, Dropout, Flatten, Conv2D, MaxPooling2D, \
-        BatchNormalization, Activation, GlobalAveragePooling2D, Reshape
+        BatchNormalization, Activation, GlobalAveragePooling2D, Reshape, SeparableConv2D
 from keras.utils import to_categorical
 from keras.applications import *
 from keras import backend as K
 from keras.engine.topology import Layer
+
+from keras_squeeze_excite_network import * 
 
 from multi_gpu_keras import multi_gpu_model
 
@@ -48,6 +50,8 @@ from functools import partial
 from itertools import  islice
 from conditional import conditional
 
+from clr_callback import *
+
 SEED = 42
 
 np.random.seed(SEED)
@@ -61,13 +65,14 @@ parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to
 parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
 parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
 parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
+parser.add_argument('-clr', '--cyclic_learning_rate',action='store_true', help='Use cyclic learning rate https://arxiv.org/abs/1506.01186')
 parser.add_argument('-o', '--optimizer', type=str, default='adam', help='Optimizer to use in training -o adam|sgd|adadelta')
-parser.add_argument('--amsgrad', action='store_true', default=False, help='Apply the AMSGrad variant of adam|adadelta from the paper "On the Convergence of Adam and Beyond".')
+parser.add_argument('--amsgrad', action='store_true', help='Apply the AMSGrad variant of adam|adadelta from the paper "On the Convergence of Adam and Beyond".')
 
 # architecture/model
 parser.add_argument('-m', '--model', help='load hdf5 model including weights (and continue training)')
 parser.add_argument('-w', '--weights', help='load hdf5 weights only (and continue training)')
-parser.add_argument('-do', '--dropout',    type=float, default=0.3, help='Dropout rate for first FC layer')
+parser.add_argument('-do', '--dropout', type=float, default=0.3, help='Dropout rate for first FC layer')
 parser.add_argument('-dol', '--dropout-last', type=float, default=0.1, help='Dropout rate for last FC layer')
 parser.add_argument('-doc', '--dropout-classifier', type=float, default=0., help='Dropout rate for classifier')
 parser.add_argument('-nfc', '--no-fcs', action='store_true', help='Dont add any FC at the end, just a softmax')
@@ -78,6 +83,7 @@ parser.add_argument('-lkf', '--learn-kernel-filter', action='store_true', help='
 parser.add_argument('-cm', '--classifier', type=str, default='ResNet50', help='Base classifier model to use')
 parser.add_argument('-uiw', '--use-imagenet-weights', action='store_true', help='Use imagenet weights (transfer learning)')
 parser.add_argument('-p', '--pooling', type=str, default='avg', help='Type of pooling to use: avg|max|none')
+parser.add_argument('-rp', '--reduce-pooling', type=int, default=None, help='If using pooling none add conv layers to reduce features, e.g. -rp 128')
 
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
@@ -136,22 +142,27 @@ MODEL_FOLDER       = 'models'
 
 CROP_SIZE = args.crop_size
 
-RESOLUTIONS = {       # model                    org   flipped
-    0: [[2688,1520]], # htc_m7          flips:   508 / 42
-    1: [[2448,3264]], # iphone_6        no flips
-    2: [[2432,4320]], # moto_maxx       flips    472 / 78
-    3: [[3120,4160]], # moto_x          flips    468 / 82
-    4: [[2322,4128]], # samsung_s4      no flips 
-    5: [[2448,3264]], # iphone 4s       no flips
-    6: [[4032,3024]], # nexus_5x        flips    544 /  6
-    7: [[780, 1040],  # Motorola-Nexus-6         2
-        [4130,3088],  #                          2
-        [4160,3088],  #                  30
-        [4160,3120],  #                  256
-        [3088,4160],  #                  18
-        [3120,4160]], #                  242
-    8: [[2322,4128]], # samsung_note3   no flips 
-    9: [[4000,6000]], # sony_nex7       no flips
+#       [size_y, size_x, probability]. Sum of probabilites for each model should add up to 1. 
+RESOLUTIONS = {                # samples*2  model
+    0: [[2688,1520, 508/550],  # 508        htc_m7 
+        [1520,2688,  42/550]], #  42
+    1: [[2448,3264,       1]], # 550        iphone_6
+    2: [[2432,4320, 472/550],  # 472        moto_maxx
+        [4320,2432,  78/550]], #  78 
+    3: [[3120,4160, 468/550],  # 468        moto_x
+        [4160,3120,  82/550]], #  82
+    4: [[2322,4128,       1]], # 550        samsung_s4
+    5: [[2448,3264,       1]], # 550        iphone 4s
+    6: [[4032,3024, 544/550],  # 544        nexus_5x
+        [3024,4032,   6/550]], #   6 
+    7: [[780, 1040,   2/550],  #   2
+        [4130,3088,   2/550],  #   2
+        [4160,3088,  30/550],  #  30
+        [4160,3120, 256/550],  # 256
+        [3088,4160,  18/550],  #  18
+        [3120,4160, 242/550]], # 242
+    8: [[2322,4128,       1]], # 550        samsung_note3 
+    9: [[4000,6000,       1]], # 550        sony_nex7
 }
 
 ORIENTATION_FLIP_ALLOWED = [
@@ -167,10 +178,11 @@ ORIENTATION_FLIP_ALLOWED = [
     False  # sony_nex7
 ]
 
-for class_id,resolutions in RESOLUTIONS.copy().items():
-    if ORIENTATION_FLIP_ALLOWED[class_id]:
-        resolutions.extend([resolution[::-1] for resolution in resolutions])
-    RESOLUTIONS[class_id] = resolutions
+
+#for class_id,resolutions in RESOLUTIONS.copy().items():
+#    if ORIENTATION_FLIP_ALLOWED[class_id]:
+##        resolutions.extend([resolution[::-1] for resolution in resolutions])
+#    RESOLUTIONS[class_id] = resolutions
 
 MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
 
@@ -234,6 +246,19 @@ def preprocess_image(img):
             'VGG19'             : 'vgg19',
             'Xception'          : 'xception',
 
+            'SEDenseNetImageNet121' : 'se_densenet',
+            'SEDenseNetImageNet161' : 'se_densenet',
+            'SEDenseNetImageNet169' : 'se_densenet',
+            'SEDenseNetImageNet264' : 'se_densenet',
+            'SEInceptionResNetV2'   : 'se_inception_resnet_v2',
+            'SEMobileNet'           : 'se_mobilenets',
+            'SEResNet50'            : 'se_resnet',
+            'SEResNet101'           : 'se_resnet',
+            'SEResNet154'           : 'se_resnet',
+            'SEInceptionV3'         : 'se_inception_v3',
+            'SEResNext'             : 'se_resnet',
+            'SEResNextImageNet'     : 'se_resnet',
+
         }
 
         if args.classifier in classifier_to_module:
@@ -283,7 +308,7 @@ def process_item(item, training, transforms=[[]]):
     shape = list(img.shape[:2])
 
     # discard images that do not have right resolution
-    if shape not in RESOLUTIONS[class_idx]:
+    if shape not in [resolution[:2] for resolution in RESOLUTIONS[class_idx]]:
         #print(item)
         return None
 
@@ -512,6 +537,18 @@ else:
     if args.learn_kernel_filter:
         x = Conv2D(3, (7, 7), strides=(1,1), use_bias=False, padding='valid', name='filtering')(x)
     x = classifier_model(x)
+
+    if args.reduce_pooling and x.shape.ndims == 4:
+
+        pool_features = int(x.shape[3])
+
+        for it in range(int(math.log2(pool_features/args.reduce_pooling))):
+
+            pool_features //= 2
+            x = Conv2D(pool_features, (3, 3), padding='same', use_bias=False, name='reduce_pooling{}'.format(it))(x)
+            x = BatchNormalization(name='bn_reduce_pooling{}'.format(it))(x)
+            x = Activation('relu', name='relu_reduce_pooling{}'.format(it))(x)
+        
     x = Reshape((-1,))(x)
     if args.dropout_classifier != 0.:
         x = Dropout(args.dropout_classifier, name='dropout_classifier')(x)
@@ -525,7 +562,8 @@ else:
                 x = Activation('relu', name='relu{}'.format(i))(x)
             else:
                 x = Dense(fc_layer, activation='relu', name='fc{}'.format(i))(x)
-            x = Dropout(dropout,                   name='dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
+            if dropout != 0:
+                x = Dropout(dropout,                   name='dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
     prediction = Dense(N_CLASSES, activation ="softmax", name="predictions")(x)
 
     model = Model(inputs=(input_image, manipulated), outputs=prediction)
@@ -660,7 +698,18 @@ if not (args.test or args.test_train):
     reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
 
     orientation_flip_augmentation_factor = (sum(ORIENTATION_FLIP_ALLOWED) / len(ORIENTATION_FLIP_ALLOWED)) if not args.no_flips else 0.5
+    
+    clr = CyclicLR(base_lr=args.learning_rate, max_lr=args.learning_rate*10,
+                        step_size=int(math.ceil(len(ids_train)  // args.batch_size)) * 4, mode='exp_range',
+                        gamma=0.99994)
 
+    callbacks = [save_checkpoint]
+
+    if args.cyclic_learning_rate:
+        callbacks.append(clr)
+    else:
+        callbacks.append(reduce_lr)
+    
     model.fit_generator(
             generator        = gen(ids_train, args.batch_size),
             steps_per_epoch  = int(math.ceil(len(ids_train)  // args.batch_size)),
@@ -668,7 +717,7 @@ if not (args.test or args.test_train):
             validation_steps = int(len(VALIDATION_TRANSFORMS) * orientation_flip_augmentation_factor  \
                                    * math.ceil(len(ids_val) // args.batch_size)),
             epochs = args.max_epoch,
-            callbacks = [save_checkpoint, reduce_lr],
+            callbacks = callbacks,
             initial_epoch = last_epoch,
             max_queue_size = 10,
             class_weight=class_weight)
