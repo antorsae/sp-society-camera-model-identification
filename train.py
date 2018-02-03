@@ -210,7 +210,7 @@ N_MANIPULATIONS = len(MANIPULATIONS)
 load_img_fast_jpg  = lambda img_path: jpeg.JPEG(img_path).decode()
 load_img           = lambda img_path: np.array(Image.open(img_path))
 
-def random_manipulation(img, manipulation=None):
+def get_random_manipulation(img, manipulation=None):
 
     if manipulation == None:
         manipulation = random.choice(MANIPULATIONS)
@@ -389,10 +389,18 @@ def process_item(item, training, transforms=[[]]):
         else:
             img = _img
 
-        random_crop = np.random.random() <0.5
+        random_crop         = np.random.random() < 0.5
+        random_manipulation = random.choice(MANIPULATIONS)
 
-        img , (rel_x, rel_y) = get_crop(img, CROP_SIZE * 2, random_crop=(random_crop and class_idx not in args.center_crops) if training else False) 
-        # * 2 bc may need to scale by 0.5x and still get a 512px crop
+        if   random_manipulation == 'bicubic0.5':
+            SAFE_CROP_SIZE = int(math.ceil(CROP_SIZE / 0.5))
+        elif random_manipulation == 'bicubic0.8':
+            SAFE_CROP_SIZE = int(math.ceil(CROP_SIZE / 0.8))
+        else:
+            SAFE_CROP_SIZE = CROP_SIZE
+
+        img , (rel_x, rel_y) = get_crop(img, SAFE_CROP_SIZE, 
+            random_crop=(random_crop and class_idx not in args.center_crops) if training else False) 
 
         if args.verbose:
             print("om: ", img.shape, item)
@@ -400,13 +408,15 @@ def process_item(item, training, transforms=[[]]):
         manipulated = 0.
         manipulation_idx = N_MANIPULATIONS
 
-        if ((np.random.rand() < (1 - 1/(N_MANIPULATIONS+1))) and training) or force_manipulation:
-            img, manipulation_idx = random_manipulation(img)
+        if ((np.random.random() < (1 - 1/(N_MANIPULATIONS+1))) and training) or force_manipulation:
+            img, manipulation_idx = get_random_manipulation(img, manipulation=random_manipulation)
             manipulated = 1.
             if args.verbose:
                 print("am: ", img.shape, item)
 
-        img, _ = get_crop(img, CROP_SIZE, random_crop=(random_crop and class_idx not in args.center_crops) if training else False)
+        if SAFE_CROP_SIZE != CROP_SIZE:
+            img, _ = get_crop(img, CROP_SIZE)
+            
         if args.verbose:
             print("ac: ", img.shape, item)
 
@@ -622,7 +632,7 @@ if args.model:
     if args.learning_rate == None and not args.test:
         dummy_model = model
         args.learning_rate = K.eval(model.optimizer.lr)
-        print("Resuming with learning rate: {}".format(args.learning_rate))
+        print("Resuming with learning rate: {:.2e}".format(args.learning_rate))
 
     predictions_name = model.outputs[0].name
     preffix_index = predictions_name.index('_')
@@ -927,7 +937,7 @@ else:
             ssy = int(img.shape[0] / CROP_SIZE * args.test_crop_supersampling)
 
             img_batch         = np.zeros((len(transforms)* ssx * ssy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-            manipulated_batch = np.zeros((len(transforms)* ssx * ssy, 1),  dtype=np.float32)
+            manipulated_batch = np.zeros((len(transforms)* ssx * ssy, 3),  dtype=np.float32)
 
             i = 0
             for transform in transforms:
@@ -937,7 +947,7 @@ else:
                 if 'orientation' in transform:
                     img = np.rot90(img, 1, (0,1))
                 if 'manipulation' in transform and not original_manipulated:
-                    img, manipulation_idx = random_manipulation(img)
+                    img, manipulation_idx = get_random_manipulation(img)
                     manipulated = np.float32([1.])
 
                 if args.test_train:
@@ -949,8 +959,8 @@ else:
                 for x in np.linspace(0, img.shape[1] - CROP_SIZE, args.test_crop_supersampling * sx, dtype=np.int64):
                     for y in np.linspace(0, img.shape[0] - CROP_SIZE, args.test_crop_supersampling * sy, dtype=np.int64):
                         _img = np.copy(img[y:y+CROP_SIZE, x:x+CROP_SIZE])
-                        img_batch[i]         = preprocess_image(_img)
-                        manipulated_batch[i] = manipulated
+                        img_batch[i]           = preprocess_image(_img)
+                        manipulated_batch[i,0] = manipulated
                         i += 1
 
             prediction, _ = model.predict_on_batch([img_batch,manipulated_batch])
