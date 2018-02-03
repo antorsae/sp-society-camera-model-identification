@@ -66,8 +66,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--max-epoch', type=int, default=200, help='Epoch to run')
 parser.add_argument('-g', '--gpus', type=int, default=1, help='Number of GPUs to use')
 parser.add_argument('-v', '--verbose', action='store_true', help='Pring debug/verbose info')
-parser.add_argument('-b', '--batch-size', type=int, default=16, help='Batch Size during training, e.g. -b 64')
-parser.add_argument('-l', '--learning_rate', type=float, default=1e-4, help='Initial learning rate')
+parser.add_argument('-b', '--batch-size', type=int, default=6, help='Batch Size during training, e.g. -b 64')
+parser.add_argument('-l', '--learning_rate', type=float, default=None, help='Initial learning rate')
 parser.add_argument('-clr', '--cyclic_learning_rate',action='store_true', help='Use cyclic learning rate https://arxiv.org/abs/1506.01186')
 parser.add_argument('-o', '--optimizer', type=str, default='adam', help='Optimizer to use in training -o adam|sgd|adadelta')
 parser.add_argument('--amsgrad', action='store_true', help='Apply the AMSGrad variant of adam|adadelta from the paper "On the Convergence of Adam and Beyond".')
@@ -107,8 +107,9 @@ parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, he
 parser.add_argument('-tta', action='store_true', help='Enable test time augmentation')
 parser.add_argument('-e', '--ensembling', type=str, default='arithmetic', help='Type of ensembling: arithmetic|geometric for TTA')
 
-
 args = parser.parse_args()
+
+args.batch_size *= args.gpus
 
 CLASSES = [
     'HTC-1-M7',
@@ -145,6 +146,7 @@ EXTRA_TRAIN_FOLDER = 'flickr_images'
 EXTRA_VAL_FOLDER   = 'val_images'
 TEST_FOLDER        = 'test'
 MODEL_FOLDER       = 'models'
+CSV_FOLDER         = 'csv'
 
 CROP_SIZE = args.crop_size
 
@@ -302,7 +304,24 @@ def get_crop(img, crop_size, random_crop=False):
         if freedom_y > 0:
             center_y += np.random.randint(math.ceil(-freedom_y/2), freedom_y - math.floor(freedom_y/2) )
 
-    return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop]
+    if img.shape[0] > img.shape[1]: # y > x
+        # vertical orientation 
+        canonical_size_x,   canonical_size_y    = img.shape[1], img.shape[0]
+        canonical_center_x, canonical_center_y  = center_x, center_y
+    else:
+        # horizontal orientation 
+        canonical_size_x,   canonical_size_y    = img.shape[0], img.shape[1]
+        canonical_center_x, canonical_center_y  = center_y, center_x
+
+    m_x, m_y = (canonical_size_x - crop_size)/2, (canonical_size_y - crop_size)/2
+
+    # rel_sx, rel_sy are normalized [-1,1] relative positions of center of crop vs. the dimensions of vertical image
+    rel_sx = (canonical_center_x - canonical_size_x/2) / m_x if m_x != 0 else 0.
+    rel_sy = (canonical_center_y - canonical_size_y/2) / m_y if m_y != 0 else 0.
+
+    #print((canonical_size_x, canonical_size_y), (canonical_center_x, canonical_center_y), (rel_sx, rel_sy))
+
+    return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop], (rel_sx, rel_sy)
 
 def get_class(class_name):
     if class_name in CLASSES:
@@ -370,7 +389,9 @@ def process_item(item, training, transforms=[[]]):
         else:
             img = _img
 
-        img = get_crop(img, CROP_SIZE * 2, random_crop=(class_idx not in args.center_crops) if training else False) 
+        random_crop = np.random.random() <0.5
+
+        img , (rel_x, rel_y) = get_crop(img, CROP_SIZE * 2, random_crop=(random_crop and class_idx not in args.center_crops) if training else False) 
         # * 2 bc may need to scale by 0.5x and still get a 512px crop
 
         if args.verbose:
@@ -385,7 +406,7 @@ def process_item(item, training, transforms=[[]]):
             if args.verbose:
                 print("am: ", img.shape, item)
 
-        img = get_crop(img, CROP_SIZE, random_crop=(class_idx not in args.center_crops) if training else False)
+        img, _ = get_crop(img, CROP_SIZE, random_crop=(random_crop and class_idx not in args.center_crops) if training else False)
         if args.verbose:
             print("ac: ", img.shape, item)
 
@@ -395,14 +416,16 @@ def process_item(item, training, transforms=[[]]):
 
         one_hot_class_idx = to_categorical(class_idx, N_CLASSES)
 
+        MO = np.float32([manipulated, rel_x, rel_y])
+
         if len(transforms) > 1:
             img_s.append(img)    
-            manipulated_s.append(manipulated)
+            manipulated_s.append(MO)
             class_idx_s.append(one_hot_class_idx)
             manipulation_idx_s.append(manipulation_idx)
 
     if len(transforms) == 1:
-        return img, manipulated, one_hot_class_idx, manipulation_idx
+        return img, MO, one_hot_class_idx, manipulation_idx
     else:
         return img_s, manipulated_s, class_idx_s, manipulation_idx_s
 
@@ -412,17 +435,14 @@ def gen(items, batch_size, training=True):
 
     validation = not training 
 
-    # during validation we store the unaltered images on batch_idx and a manip one on batch_idx + batch_size, hence the 2
-    valid_batch_factor = 1 # TODO: augment validation
-
     # X holds image crops
-    X = np.empty((batch_size * valid_batch_factor, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-    # O whether the image has been manipulated (1.) or not (0.)
-    O = np.empty((batch_size * valid_batch_factor, 1), dtype=np.float32)
+    X = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+    # MO whether the image has been manipulated (1.) or not (0.) and relative location of crop (rel_x, rel_y)
+    O = np.empty((batch_size, 3), dtype=np.float32)
 
     # class index
-    y = np.empty((batch_size * valid_batch_factor, N_CLASSES), dtype=np.float32)
-    m = np.empty((batch_size * valid_batch_factor), dtype=np.int64)
+    y = np.empty((batch_size, N_CLASSES), dtype=np.float32)
+    m = np.empty((batch_size,),           dtype=np.int64)
     
     if args.class_aware_sampling:
         items_per_class = defaultdict(list)
@@ -591,7 +611,7 @@ def CaCNN(include_top, weights, input_shape, pooling):
 if args.model:
     print("Loading model " + args.model)
 
-    model = load_model(args.model, compile=False)
+    model = load_model(args.model, compile=False if args.test or (args.learning_rate is not None) else True)
     # e.g. DenseNet201_do0.3_doc0.0_avg-epoch128-val_acc0.964744.hdf5
     match = re.search(r'(([a-zA-Z\d]+)_cs[,A-Za-z_\d\.]+)-epoch(\d+)-.*\.hdf5', args.model)
     model_name = match.group(1)
@@ -599,13 +619,25 @@ if args.model:
     CROP_SIZE = args.crop_size  = model.get_input_shape_at(0)[0][1]
     print("Overriding classifier: {} and crop size: {}".format(args.classifier, args.crop_size))
     last_epoch = int(match.group(3))
+    if args.learning_rate == None and not args.test:
+        dummy_model = model
+        args.learning_rate = K.eval(model.optimizer.lr)
+        print("Resuming with learning rate: {}".format(args.learning_rate))
+
+    predictions_name = model.outputs[0].name
+    preffix_index = predictions_name.index('_')
+    preffix = predictions_name[:preffix_index+1] if preffix_index != -1 else ''
+
 else:
+    if args.learning_rate is None:
+        args.learning_rate = 1e-4   # default LR unless told otherwise
+
     last_epoch = 0
 
-    preffix = 'ie3_'
+    preffix = ''
 
     input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = preffix + 'image' )
-    manipulated = Input(shape=(1,),  name = preffix + 'manipulated' )
+    manipulated = Input(shape=(3,),  name = preffix + 'manipulated' )
 
     classifier = globals()[args.classifier]
 
@@ -846,7 +878,8 @@ if not (args.test or args.test_train):
             callbacks = callbacks,
             initial_epoch = last_epoch,
             max_queue_size = 10,
-            class_weight={ preffix + 'predictions': class_weight, preffix + 'manipulations' : [1.] * N_MANIPULATIONS } if not args.class_aware_sampling else None)
+            class_weight={ preffix + 'predictions': class_weight, preffix + 'manipulations' : [1.] * N_MANIPULATIONS } \
+                if not args.class_aware_sampling else None)
 
 else:
     # TEST
@@ -861,7 +894,7 @@ else:
 
     match = re.search(r'([^/]*)\.hdf5', args.model)
     model_name = match.group(1) + ('_tta_' + args.ensembling if args.tta else '')
-    csv_name   = 'submission_' + model_name + '.csv'
+    csv_name   = os.path.join(CSV_FOLDER, 'submission_' + model_name + '.csv')
     with conditional(args.test, open(csv_name, 'w')) as csvfile:
 
         if args.test:
@@ -877,7 +910,7 @@ else:
             img = np.array(Image.open(idx))
 
             if args.test_train:
-                img = get_crop(img, 512*2, random_crop=False)
+                img, _ = get_crop(img, 512*2, random_crop=False)
 
             original_img = img
 
@@ -908,7 +941,7 @@ else:
                     manipulated = np.float32([1.])
 
                 if args.test_train:
-                    img = get_crop(img, 512, random_crop=False)
+                    img, _ = get_crop(img, 512, random_crop=False)
 
                 sx = img.shape[1] / CROP_SIZE
                 sy = img.shape[0] / CROP_SIZE
@@ -950,7 +983,7 @@ else:
 
             items_per_class = len(prediction_probabilities) // N_CLASSES # it works b/c test dataset length is divisible by N_CLASSES
 
-            csv_name  = 'submission_' + model_name + '_by_probability.csv'
+            csv_name  = os.path.join(CSV_FOLDER,'submission_' + model_name + '_by_probability.csv')
             with open(csv_name, 'w') as csvfile:
                 csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
                 csv_writer.writerow(['fname','camera'])
