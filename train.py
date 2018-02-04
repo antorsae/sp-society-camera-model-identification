@@ -97,6 +97,8 @@ parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use ori
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
 parser.add_argument('-xl', '--experimental-loss', action='store_true', help='Use experimental loss to get flat class probabily distribution on predictions')
+parser.add_argument('-mu', '--mix-up', action='store_true', help='Use mix-up see: https://arxiv.org/abs/1710.09412')
+
 # dataset (training)
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
 
@@ -392,10 +394,8 @@ def process_item(item, training, transforms=[[]]):
         random_crop         = np.random.random() < 0.5
         random_manipulation = random.choice(MANIPULATIONS)
 
-        if   random_manipulation == 'bicubic0.5':
-            SAFE_CROP_SIZE = int(math.ceil(CROP_SIZE / 0.5))
-        elif random_manipulation == 'bicubic0.8':
-            SAFE_CROP_SIZE = int(math.ceil(CROP_SIZE / 0.8))
+        if   random_manipulation.startswith('bicubic'):
+            SAFE_CROP_SIZE = int(math.ceil(CROP_SIZE / float(random_manipulation[7:])))
         else:
             SAFE_CROP_SIZE = CROP_SIZE
 
@@ -412,11 +412,11 @@ def process_item(item, training, transforms=[[]]):
             img, manipulation_idx = get_random_manipulation(img, manipulation=random_manipulation)
             manipulated = 1.
             if args.verbose:
-                print("am: ", img.shape, item)
+                print("am: ", random_manipulation, img.shape, item)
 
         if SAFE_CROP_SIZE != CROP_SIZE:
             img, _ = get_crop(img, CROP_SIZE)
-            
+
         if args.verbose:
             print("ac: ", img.shape, item)
 
@@ -424,7 +424,8 @@ def process_item(item, training, transforms=[[]]):
         if args.verbose:
             print("ap: ", img.shape, item)
 
-        one_hot_class_idx = to_categorical(class_idx, N_CLASSES)
+        one_hot_class_idx        = to_categorical(class_idx       , N_CLASSES)
+        one_hot_manipulation_idx = to_categorical(manipulation_idx, N_MANIPULATIONS+1)
 
         MO = np.float32([manipulated, rel_x, rel_y])
 
@@ -432,10 +433,10 @@ def process_item(item, training, transforms=[[]]):
             img_s.append(img)    
             manipulated_s.append(MO)
             class_idx_s.append(one_hot_class_idx)
-            manipulation_idx_s.append(manipulation_idx)
+            manipulation_idx_s.append(one_hot_manipulation_idx)
 
     if len(transforms) == 1:
-        return img, MO, one_hot_class_idx, manipulation_idx
+        return img, MO, one_hot_class_idx, one_hot_manipulation_idx
     else:
         return img_s, manipulated_s, class_idx_s, manipulation_idx_s
 
@@ -451,8 +452,8 @@ def gen(items, batch_size, training=True):
     O = np.empty((batch_size, 3), dtype=np.float32)
 
     # class index
-    y = np.empty((batch_size, N_CLASSES), dtype=np.float32)
-    m = np.empty((batch_size,),           dtype=np.int64)
+    y = np.empty((batch_size, N_CLASSES),           dtype=np.float32)
+    m = np.empty((batch_size, N_MANIPULATIONS + 1), dtype=np.float32)
     
     if args.class_aware_sampling:
         items_per_class = defaultdict(list)
@@ -481,7 +482,7 @@ def gen(items, batch_size, training=True):
             items_done  = 0
             while items_done < len(items):
                 item_batch = []
-                for _ in range(batch_size):
+                for _ in range(batch_size * (2 if args.mix_up and training else 1)):
                     random_class = class_index % N_CLASSES
                     class_index += 1
                     if len(items_per_class_running[random_class]) == 0:
@@ -491,6 +492,22 @@ def gen(items, batch_size, training=True):
                 random.shuffle(item_batch)
 
                 batch_results = p.map(process_item_func, item_batch)
+
+                if args.mix_up and training:
+                    mixed_batch_results = []
+                    alpha = 0.2
+                    for (X1, O1, y1, m1), (X2, O2, y2, m2) in zip(batch_results[0::2], batch_results[1::2]):
+                        l = np.random.beta(alpha, alpha)
+                        m_X  = X1 * l + (1-l) * X2
+                        m_O  = O1 * l + (1-l) * O2
+                        m_y  = y1 * l + (1-l) * y2
+                        m_m  = m1 * l + (1-l) * m2
+
+                        mixed_batch_results.append((m_X,m_O, m_y, m_m))
+                    
+                    item_batch = ['?'] * batch_size 
+                    batch_results = mixed_batch_results
+
                 for batch_result, item in zip(batch_results, item_batch):
 
                     # FIX DUP CODE START
@@ -635,7 +652,7 @@ if args.model:
         print("Resuming with learning rate: {:.2e}".format(args.learning_rate))
 
     predictions_name = model.outputs[0].name
-    preffix_index = predictions_name.index('_')
+    preffix_index = predictions_name.find('_')
     preffix = predictions_name[:preffix_index+1] if preffix_index != -1 else ''
 
 else:
@@ -730,6 +747,7 @@ else:
         ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('_nf' if args.no_flips else '') + \
         ('_cas' if args.class_aware_sampling else '') + \
+        ('_mu' if args.mix_up else '') + \
         ('_n5' if args.nexus5_hack else '') 
 
 
@@ -841,9 +859,9 @@ if not (args.test or args.test_train):
                 for classifier_layer in layer.layers:
                     classifier_layer.trainable = False
 
-    loss = { preffix + 'predictions' : 'categorical_crossentropy', preffix + 'manipulations' : 'sparse_categorical_crossentropy'} \
+    loss = { preffix + 'predictions' : 'categorical_crossentropy', preffix + 'manipulations' : 'categorical_crossentropy'} \
         if not args.experimental_loss else \
-        { preffix + 'predictions' : categorical_crossentropy_and_variance,preffix + 'predictions' : 'sparse_categorical_crossentropy'}
+        { preffix + 'predictions' : categorical_crossentropy_and_variance,preffix + 'manipulations' : 'categorical_crossentropy'}
 
     # monkey-patch loss so model loads ok
     # https://github.com/fchollet/keras/issues/5916#issuecomment-290344248
