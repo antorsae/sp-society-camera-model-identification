@@ -359,10 +359,14 @@ def process_item(item, training, transforms=[[]]):
     else:
         _img = np.copy(img)
 
+        # inputs
         img_s              = [ ]
         manipulated_s      = [ ]
-        class_idx_s        = [ ]
-        manipulation_idx_s = [ ]
+        crop_center_s      = [ ]
+
+        # outputs
+        one_hot_class_idx_s        = [ ]
+        one_hot_manipulation_idx_s = [ ]
 
     for transform in transforms:
 
@@ -406,7 +410,7 @@ def process_item(item, training, transforms=[[]]):
             print("om: ", img.shape, item)
 
         manipulated = 0.
-        manipulation_idx = N_MANIPULATIONS
+        manipulation_idx = N_MANIPULATIONS # aka not manipulated
 
         if ((np.random.random() < (1 - 1/(N_MANIPULATIONS+1))) and training) or force_manipulation:
             img, manipulation_idx = get_random_manipulation(img, manipulation=random_manipulation)
@@ -427,18 +431,20 @@ def process_item(item, training, transforms=[[]]):
         one_hot_class_idx        = to_categorical(class_idx       , N_CLASSES)
         one_hot_manipulation_idx = to_categorical(manipulation_idx, N_MANIPULATIONS+1)
 
-        MO = np.float32([manipulated, rel_x, rel_y])
+        crop_center = np.float32([rel_x, rel_y])
 
         if len(transforms) > 1:
             img_s.append(img)    
-            manipulated_s.append(MO)
-            class_idx_s.append(one_hot_class_idx)
-            manipulation_idx_s.append(one_hot_manipulation_idx)
+            manipulated_s.append(manipulated)
+            crop_center_s.append(crop_center)
+
+            one_hot_class_idx_s.append(one_hot_class_idx)
+            one_hot_manipulation_idx_s.append(one_hot_manipulation_idx)
 
     if len(transforms) == 1:
-        return img, MO, one_hot_class_idx, one_hot_manipulation_idx
+        return img, manipulated, crop_center, one_hot_class_idx, one_hot_manipulation_idx
     else:
-        return img_s, manipulated_s, class_idx_s, manipulation_idx_s
+        return img_s, manipulated_s, crop_center_s, one_hot_class_idx_s, one_hot_manipulation_idx_s
 
 VALIDATION_TRANSFORMS = [ [], ['orientation'], ['manipulation'], ['orientation','manipulation']]
 
@@ -446,10 +452,12 @@ def gen(items, batch_size, training=True):
 
     validation = not training 
 
-    # X holds image crops
+    # X image crops
     X = np.empty((batch_size, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-    # MO whether the image has been manipulated (1.) or not (0.) and relative location of crop (rel_x, rel_y)
-    O = np.empty((batch_size, 3), dtype=np.float32)
+    # M whether the image has been manipulated (1.) or not (0.) 
+    M = np.empty((batch_size, 1), dtype=np.float32)
+    # C relative location of crop (rel_x, rel_y)
+    C = np.empty((batch_size, 2), dtype=np.float32)
 
     # class index
     y = np.empty((batch_size, N_CLASSES),           dtype=np.float32)
@@ -496,16 +504,18 @@ def gen(items, batch_size, training=True):
                 if args.mix_up and training:
                     mixed_batch_results = []
                     alpha = 0.2
-                    for (X1, O1, y1, m1), (X2, O2, y2, m2) in zip(batch_results[0::2], batch_results[1::2]):
+                    for (X1, M1, C1, y1, m1), (X2, M2, C2, y2, m2) in zip(batch_results[0::2], batch_results[1::2]):
                         l = np.random.beta(alpha, alpha)
                         m_X  = X1 * l + (1-l) * X2
-                        m_O  = O1 * l + (1-l) * O2
+                        m_M  = M1 * l + (1-l) * M2
+                        m_C  = C1 * l + (1-l) * C2
+
                         m_y  = y1 * l + (1-l) * y2
                         m_m  = m1 * l + (1-l) * m2
 
-                        mixed_batch_results.append((m_X,m_O, m_y, m_m))
+                        mixed_batch_results.append((m_X,m_M,m_C, m_y, m_m))
                     
-                    item_batch = ['?'] * batch_size 
+                    item_batch    = ['?'] * batch_size     # fix
                     batch_results = mixed_batch_results
 
                 for batch_result, item in zip(batch_results, item_batch):
@@ -513,20 +523,20 @@ def gen(items, batch_size, training=True):
                     # FIX DUP CODE START
                     if batch_result is not None:
                         if len(transforms) == 1:
-                            X[batch_idx], O[batch_idx], y[batch_idx], m[batch_idx] = batch_result
+                            X[batch_idx], M[batch_idx], C[batch_idx], y[batch_idx], m[batch_idx] = batch_result
                             batch_idx += 1
                         else:
-                            for _X,_O,_y,_m in zip(*batch_result):
-                                X[batch_idx], O[batch_idx], y[batch_idx], m[batch_idx] = _X,_O,_y,_m
+                            for _X,_M,_C,_y,_m in zip(*batch_result):
+                                X[batch_idx], M[batch_idx], C[batch_idx], y[batch_idx], m[batch_idx] = _X,_M,_C,_y,_m
                                 batch_idx += 1
                                 if batch_idx == batch_size:
-                                    yield([X, O], [y, m])
+                                    yield([X, M, C], [y, m])
                                     batch_idx = 0
                     else: # if batch result is None
                         bad_items.add(item)
 
                     if batch_idx == batch_size:
-                        yield([X, O], [y, m])
+                        yield([X, M, C], [y, m])
                         batch_idx = 0
                     # FIX DUP CODE END
                 items_done += batch_size
@@ -540,20 +550,20 @@ def gen(items, batch_size, training=True):
                     # FIX DUP CODE START
                     if batch_result is not None:
                         if len(transforms) == 1:
-                            X[batch_idx], O[batch_idx], y[batch_idx], m[batch_idx] = batch_result
+                            X[batch_idx], M[batch_idx], C[batch_idx], y[batch_idx], m[batch_idx] = batch_result
                             batch_idx += 1
                         else:
-                            for _X,_O,_y, _m in zip(*batch_result):
-                                X[batch_idx], O[batch_idx], y[batch_idx], m[batch_idx] = _X,_O,_y,_m
+                            for _X,_M,_C,_y,_m in zip(*batch_result):
+                                X[batch_idx], M[batch_idx], C[batch_idx], y[batch_idx], m[batch_idx] = _X,_M,_C,_y,_m
                                 batch_idx += 1
                                 if batch_idx == batch_size:
-                                    yield([X, O], [y, m])
+                                    yield([X, M, C], [y, m])
                                     batch_idx = 0
                     else: # if batch result is None
                         bad_items.add(item)
 
                     if batch_idx == batch_size:
-                        yield([X, O], [y, m])
+                        yield([X, M, C], [y, m])
                         batch_idx = 0
                     # FIX DUP CODE END
 
@@ -654,7 +664,6 @@ if args.model:
     predictions_name = model.outputs[0].name
     preffix_index = predictions_name.find('_')
     preffix = predictions_name[:preffix_index+1] if preffix_index != -1 else ''
-
 else:
     if args.learning_rate is None:
         args.learning_rate = 1e-4   # default LR unless told otherwise
@@ -664,7 +673,8 @@ else:
     preffix = ''
 
     input_image = Input(shape=(CROP_SIZE, CROP_SIZE, 3),  name = preffix + 'image' )
-    manipulated = Input(shape=(3,),  name = preffix + 'manipulated' )
+    manipulated = Input(shape=(1,),                       name = preffix + 'manipulated' )
+    crop_center = Input(shape=(2,),                       name = preffix + 'crop_center' )
 
     classifier = globals()[args.classifier]
 
@@ -693,10 +703,14 @@ else:
         
     if x.shape.ndims > 2:
         x = Reshape((-1,), name=preffix + 'reshape0')(x)
+
     if args.dropout_classifier != 0.:
         x = Dropout(args.dropout_classifier, name=preffix + 'dropout_classifier')(x)
+
     x = concatenate([x, manipulated], name=preffix + 'concat0')
+
     manipulation = None
+
     if not args.no_fcs:
         dropouts = np.linspace( args.dropout,  args.dropout_last, len(args.fully_connected_layers))
 
@@ -714,9 +728,9 @@ else:
             if dropout != 0:
                 x_m = Dropout(dropout,   name=preffix + 'dropout_fc_m{}_{:04.2f}'.format(i, dropout))(x_m)
 
-            manipulation = Dense(N_MANIPULATIONS+1, activation ="softmax", name=preffix + "manipulations")(x_m)
+        manipulation = Dense(N_MANIPULATIONS+1, activation ="softmax", name=preffix + "manipulations")(x_m)
 
-        x = concatenate([x, manipulation], name=preffix + 'concat1')
+        x = concatenate([x, manipulation, crop_center], name=preffix + 'concat1')
 
         for i, (fc_layer, dropout) in enumerate(zip(args.fully_connected_layers, dropouts)):
             if args.batch_normalization:
@@ -727,11 +741,13 @@ else:
                 x = Dense(fc_layer, activation=args.fully_connected_activation, name=preffix + 'fc{}'.format(i))(x)
             if dropout != 0:
                 x = Dropout(dropout,                   name=preffix + 'dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
+
     prediction   = Dense(N_CLASSES, activation ="softmax", name=preffix + "predictions")(x)
+    
     if manipulation is None:
         manipulation = Dense(N_MANIPULATIONS+1, activation ="softmax", name=preffix + "manipulations")(x)
 
-    model = Model(inputs=(input_image, manipulated), outputs=(prediction, manipulation))
+    model = Model(inputs=(input_image, manipulated, crop_center), outputs=(prediction, manipulation))
 
     model_name = args.classifier + \
         '_cs{}'.format(args.crop_size) + \
