@@ -201,12 +201,7 @@ ORIENTATION_FLIP_ALLOWED = [
 ]
 
 
-#for class_id,resolutions in RESOLUTIONS.copy().items():
-#    if ORIENTATION_FLIP_ALLOWED[class_id]:
-##        resolutions.extend([resolution[::-1] for resolution in resolutions])
-#    RESOLUTIONS[class_id] = resolutions
-
-MANIPULATIONS = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
+MANIPULATIONS   = ['jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic0.5', 'bicubic0.8', 'bicubic1.5', 'bicubic2.0']
 N_MANIPULATIONS = len(MANIPULATIONS)
 
 load_img_fast_jpg  = lambda img_path: jpeg.JPEG(img_path).decode()
@@ -321,8 +316,6 @@ def get_crop(img, crop_size, random_crop=False):
     rel_sx = (canonical_center_x - canonical_size_x/2) / m_x if m_x != 0 else 0.
     rel_sy = (canonical_center_y - canonical_size_y/2) / m_y if m_y != 0 else 0.
 
-    #print((canonical_size_x, canonical_size_y), (canonical_center_x, canonical_center_y), (rel_sx, rel_sy))
-
     return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop], (rel_sx, rel_sy)
 
 def get_class(class_name):
@@ -379,6 +372,7 @@ def process_item(item, training, transforms=[[]]):
 
         # some images are landscape, others are portrait, so augment training by randomly changing orientation
         if not args.no_flips and ((((np.random.rand() < 0.5) and training and ORIENTATION_FLIP_ALLOWED[class_idx])) or force_orientation):
+
             # TESTING: do not flip Nexus 5
             if (class_idx == 6) and args.nexus5_hack:
                 canonical_resolution = tuple(RESOLUTIONS[class_idx][0][:2])
@@ -398,7 +392,7 @@ def process_item(item, training, transforms=[[]]):
         random_crop         = np.random.random() < 0.5
         random_manipulation = random.choice(MANIPULATIONS)
 
-        if   random_manipulation.startswith('bicubic'):
+        if random_manipulation.startswith('bicubic'):
             SAFE_CROP_SIZE = int(math.ceil(CROP_SIZE / float(random_manipulation[7:])))
         else:
             SAFE_CROP_SIZE = CROP_SIZE
@@ -743,7 +737,7 @@ else:
                 x = Dropout(dropout,                   name=preffix + 'dropout_fc{}_{:04.2f}'.format(i, dropout))(x)
 
     prediction   = Dense(N_CLASSES, activation ="softmax", name=preffix + "predictions")(x)
-    
+
     if manipulation is None:
         manipulation = Dense(N_MANIPULATIONS+1, activation ="softmax", name=preffix + "manipulations")(x)
 
