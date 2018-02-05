@@ -965,7 +965,8 @@ else:
             ssy = int(img.shape[0] / CROP_SIZE * args.test_crop_supersampling)
 
             img_batch         = np.zeros((len(transforms)* ssx * ssy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-            manipulated_batch = np.zeros((len(transforms)* ssx * ssy, 3),  dtype=np.float32)
+            manipulated_batch = np.zeros((len(transforms)* ssx * ssy, 1),  dtype=np.float32)
+            center_crop_batch = np.zeros((len(transforms)* ssx * ssy, 2),  dtype=np.float32)
 
             i = 0
             for transform in transforms:
@@ -973,7 +974,7 @@ else:
                 manipulated = np.copy(original_manipulated)
 
                 if 'orientation' in transform:
-                    img = np.rot90(img, 1, (0,1))
+                    img = np.rot90(img, 3, (0,1))
                 if 'manipulation' in transform and not original_manipulated:
                     img, manipulation_idx = get_random_manipulation(img)
                     manipulated = np.float32([1.])
@@ -988,10 +989,10 @@ else:
                     for y in np.linspace(0, img.shape[0] - CROP_SIZE, args.test_crop_supersampling * sy, dtype=np.int64):
                         _img = np.copy(img[y:y+CROP_SIZE, x:x+CROP_SIZE])
                         img_batch[i]           = preprocess_image(_img)
-                        manipulated_batch[i,0] = manipulated
+                        manipulated_batch[i] = manipulated
                         i += 1
 
-            prediction, _ = model.predict_on_batch([img_batch,manipulated_batch])
+            prediction, _ = model.predict_on_batch([img_batch,manipulated_batch, center_crop_batch])
             if prediction.shape[0] != 1: # TTA
                 if args.ensembling == 'geometric':
                     predictions = np.log(prediction + K.epsilon()) # avoid numerical instability log(0)
