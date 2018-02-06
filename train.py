@@ -101,6 +101,7 @@ parser.add_argument('-mu', '--mix-up', action='store_true', help='Use mix-up see
 
 # dataset (training)
 parser.add_argument('-x', '--extra-dataset', action='store_true', help='Use dataset from https://www.kaggle.com/c/sp-society-camera-model-identification/discussion/47235')
+parser.add_argument('-xx', '--flickr-dataset', action='store_true', help='Use Flickr CC images dataset')
 
 # test
 parser.add_argument('-t', '--test', action='store_true', help='Test model and generate CSV submission file')
@@ -143,12 +144,13 @@ N_CLASSES = len(CLASSES)
 if args.center_crops==[-1]:
     args.center_crops = range(N_CLASSES)
 
-TRAIN_FOLDER       = 'train'
-EXTRA_TRAIN_FOLDER = 'flickr_images'
-EXTRA_VAL_FOLDER   = 'val_images'
-TEST_FOLDER        = 'test'
-MODEL_FOLDER       = 'models'
-CSV_FOLDER         = 'csv'
+TRAIN_FOLDER        = 'train'
+EXTRA_TRAIN_FOLDER  = 'flickr_images'
+FLICKR_TRAIN_FOLDER = 'flickr_dataset_CC'
+EXTRA_VAL_FOLDER    = 'val_images'
+TEST_FOLDER         = 'test'
+MODEL_FOLDER        = 'models'
+CSV_FOLDER          = 'csv'
 
 CROP_SIZE = args.crop_size
 
@@ -160,29 +162,35 @@ CROP_SIZE = args.crop_size
 #
 #       [size_y, size_x, probability]. Sum of probabilites for each model should add up to 1. 
 #
-RESOLUTIONS = {                # samples*2  model      samples   EXIF orientation
+# The first entry for each camera is the CANONICAL RESOLUTION i.e. vertical orientation px sensor size
 #
+RESOLUTIONS = {                # samples*2  model      samples   EXIF orientation
+#         y    x     ratio
     0: [[2688,1520, 508/550],  # 508        htc_m7         275   Orientation: TopLeft
         [1520,2688,  42/550]], #  42
-    1: [[2448,3264,       1]], # 550        iphone_6       273   Orientation: RightTop
-                               #                             2   Orientation: TopLeft    
-    2: [[2432,4320, 472/550],  # 472        moto_maxx      275   Orientation: Undefined
-        [4320,2432,  78/550]], #  78 
-    3: [[3120,4160, 468/550],  # 468        moto_x         275   Orientation: Undefined
-        [4160,3120,  82/550]], #  82
-    4: [[2322,4128,       1]], # 550        samsung_s4     275   Orientation: RightTop
-    5: [[2448,3264,       1]], # 550        iphone 4s      275   Orientation: RightTop
+    1: [[3264,2448,       0],
+        [2448,3264,       1]],  # 550        iphone_6       273   Orientation: RightTop
+    2: [[4320,2432,  78/550],  # 78
+        [2432,4320, 472/550]], # 472        moto_maxx      275   Orientation: Undefined
+    3: [[4160,3120,  82/550],  #  82
+        [3120,4160, 468/550]], # 468        moto_x         275   Orientation: Undefined
+    4: [[4128,2322,       0],
+        [2322,4128,       1]], # 550        samsung_s4     275   Orientation: RightTop
+    5: [[3264,2448,       0],  #  
+        [2448,3264,       1]], # 550        iphone 4s      275   Orientation: RightTop
     6: [[4032,3024, 544/550],  # 544        nexus_5x       275   Orientation: Undefined
         [3024,4032,   6/550]], #   6 
-    7: [[780, 1040,   2/550],  #   2        nexus_6          1   Orientation: LeftBottom
+    7: [[4160,3120, 256/550],  # 256
+        [780, 1040,   2/550],  #   2        nexus_6          1   Orientation: LeftBottom
         [4130,3088,   2/550],  #   2                       274   Orientation: TopLeft
         [4160,3088,  30/550],  #  30
-        [4160,3120, 256/550],  # 256
         [3088,4160,  18/550],  #  18
         [3120,4160, 242/550]], # 242
-    8: [[2322,4128,       1]], # 550        samsung_note3  196   Orientation: RightTop
+    8: [[4128,2322,       0],
+        [2322,4128,       1]], # 550        samsung_note3  196   Orientation: RightTop
                                #                            79   Orientation: TopLeft
-    9: [[4000,6000,       1]], # 550        sony_nex7       35   Orientation: LeftBottom
+    9: [[6000,4000,       0],
+        [4000,6000,       1]], # 550        sony_nex7       35   Orientation: LeftBottom
                                #                             3   Orientation: RightTop
                                #                           237   Orientation: TopLeft
 }
@@ -286,7 +294,8 @@ def preprocess_image(img):
         preprocess_input_function = getattr(globals()[classifier_module_name], 'preprocess_input')
         return preprocess_input_function(img.astype(np.float32))
 
-def get_crop(img, crop_size, random_crop=False):
+def get_crop(img, crop_size, random_crop=False, class_idx=None):
+    original_shape = img.shape
     center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
     half_crop = crop_size // 2
     pad_x = max(0, crop_size - img.shape[1])
@@ -295,26 +304,32 @@ def get_crop(img, crop_size, random_crop=False):
         img = np.pad(img, ((pad_y//2, pad_y - pad_y//2), (pad_x//2, pad_x - pad_x//2), (0,0)), mode='wrap')
         center_x, center_y = img.shape[1] // 2, img.shape[0] // 2
     if random_crop:
-        freedom_x, freedom_y = img.shape[1] - crop_size, img.shape[0] - crop_size
+        freedom_x, freedom_y = img.shape[1] - crop_size - 2, img.shape[0] - crop_size - 2
         if freedom_x > 0:
-            center_x += np.random.randint(math.ceil(-freedom_x/2), freedom_x - math.floor(freedom_x/2) )
+            center_x += (np.random.randint(math.ceil(-freedom_x/2), freedom_x - math.floor(freedom_x/2)) // 2 ) * 2
         if freedom_y > 0:
-            center_y += np.random.randint(math.ceil(-freedom_y/2), freedom_y - math.floor(freedom_y/2) )
+            center_y += (np.random.randint(math.ceil(-freedom_y/2), freedom_y - math.floor(freedom_y/2)) // 2 ) * 2
 
-    if img.shape[0] > img.shape[1]: # y > x
-        # vertical orientation 
-        canonical_size_x,   canonical_size_y    = img.shape[1], img.shape[0]
-        canonical_center_x, canonical_center_y  = center_x, center_y
+    # Verify we move center in 2x multiples, to align with CFA pattern (see //2 * 2 above)
+    assert abs(center_x - img.shape[1] // 2) % 2 == 0
+    assert abs(center_y - img.shape[0] // 2) % 2 == 0
+
+    if class_idx != None:
+        canonical_size_y, canonical_size_x = RESOLUTIONS[class_idx][0][:2]
+        if original_shape[0] > original_shape[1]: # y > x
+            # vertical orientation 
+            canonical_center_x, canonical_center_y  = center_x, center_y
+        else:
+            # horizontal orientation (flip it)
+            canonical_center_x, canonical_center_y  = center_y, center_x
+
+        m_x, m_y = (canonical_size_x - crop_size)/2, (canonical_size_y - crop_size)/2
+
+        # rel_sx, rel_sy are normalized [-1,1] relative positions of center of crop vs. the dimensions of vertical image
+        rel_sx = (canonical_center_x - canonical_size_x/2) / m_x if m_x != 0 else 0.
+        rel_sy = (canonical_center_y - canonical_size_y/2) / m_y if m_y != 0 else 0.
     else:
-        # horizontal orientation 
-        canonical_size_x,   canonical_size_y    = img.shape[0], img.shape[1]
-        canonical_center_x, canonical_center_y  = center_y, center_x
-
-    m_x, m_y = (canonical_size_x - crop_size)/2, (canonical_size_y - crop_size)/2
-
-    # rel_sx, rel_sy are normalized [-1,1] relative positions of center of crop vs. the dimensions of vertical image
-    rel_sx = (canonical_center_x - canonical_size_x/2) / m_x if m_x != 0 else 0.
-    rel_sy = (canonical_center_y - canonical_size_y/2) / m_y if m_y != 0 else 0.
+        rel_sx = rel_sy = 0
 
     return img[center_y - half_crop : center_y + crop_size - half_crop, center_x - half_crop : center_x + crop_size - half_crop], (rel_sx, rel_sy)
 
@@ -335,16 +350,28 @@ def process_item(item, training, transforms=[[]]):
 
     validation = not training 
 
-    img = load_img_fast_jpg(item)
+    try:
+        img = load_img_fast_jpg(item)
+    except Exception:
+        try:
+            img = load_img(item)
+        except Exception:
+            print('Decoding error:', item)
+            return None
 
     shape = list(img.shape[:2])
 
     # discard images that do not have right resolution
-    if shape not in [resolution[:2] for resolution in RESOLUTIONS[class_idx]]:
-        return None
+    #if shape not in [resolution[:2] for resolution in RESOLUTIONS[class_idx]]:
+    #    return None
 
     # some images may not be downloaded correctly and are B/W, discard those
     if img.ndim != 3:
+        print('Ndims !=3 error:', item)
+        return None
+
+    if img.shape[2] != 3:
+        print('More than 3 channels error:', item)
         return None
 
     if len(transforms) == 1:
@@ -398,7 +425,8 @@ def process_item(item, training, transforms=[[]]):
             SAFE_CROP_SIZE = CROP_SIZE
 
         img , (rel_x, rel_y) = get_crop(img, SAFE_CROP_SIZE, 
-            random_crop=(random_crop and class_idx not in args.center_crops) if training else False) 
+            random_crop=(random_crop and class_idx not in args.center_crops) if training else False,
+            class_idx = class_idx) 
 
         if args.verbose:
             print("om: ", img.shape, item)
@@ -536,11 +564,12 @@ def gen(items, batch_size, training=True):
                 items_done += batch_size
 
         else:
+
             iter_items = iter(items)
             for item_batch in iter(lambda:list(islice(iter_items, batch_size)), []):
                 
                 batch_results = p.map(process_item_func, item_batch)
-                for batch_result in batch_results:
+                for batch_result, item in zip(batch_results, item_batch):
                     # FIX DUP CODE START
                     if batch_result is not None:
                         if len(transforms) == 1:
@@ -555,6 +584,7 @@ def gen(items, batch_size, training=True):
                                     batch_idx = 0
                     else: # if batch result is None
                         bad_items.add(item)
+
 
                     if batch_idx == batch_size:
                         yield([X, M, C], [y, m])
@@ -754,6 +784,7 @@ else:
         '_dol' + str(args.dropout_last) + \
         '_' + args.pooling + \
         ('_x' if args.extra_dataset else '') + \
+        ('_xx' if args.flickr_dataset else '') + \
         ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('_nf' if args.no_flips else '') + \
         ('_cas' if args.class_aware_sampling else '') + \
@@ -796,31 +827,51 @@ if not (args.test or args.test_train):
     ids = glob.glob(join(TRAIN_FOLDER,'*/*.jpg'))
     ids.sort()
 
-    if not args.extra_dataset:
+    if not (args.extra_dataset or args.flickr_dataset):
         ids_train, ids_val = train_test_split(ids, test_size=0.1, random_state=SEED)
     else:
         ids_train = ids
         ids_val   = [ ]
 
-        extra_train_ids = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n')) \
-            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'good_jpgs'))]
-        low_quality     = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
-            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'low_quality'))]
-        bad_resolution  = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
-            for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'bad_resolution'))]
-        reject_ids = low_quality + bad_resolution
-        extra_train_ids = [idx for idx in extra_train_ids if idx not in reject_ids]
-        extra_train_ids.sort()
-        ids_train.extend(extra_train_ids)
+        if args.extra_dataset:
+            extra_train_ids = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n')) \
+                for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'good_jpgs'))]
+            low_quality     = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+                for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'low_quality'))]
+            bad_resolution  = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+                for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'bad_resolution'))]
+            bad_jpgs        = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+                for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'bad_jpgs'))]
+            offending_jpgs  = [os.path.join(EXTRA_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+                for line in open(os.path.join(EXTRA_TRAIN_FOLDER, 'offending_jpgs'))]                
+            reject_ids = low_quality + bad_resolution + bad_jpgs + offending_jpgs
+            extra_train_ids = [idx for idx in extra_train_ids if idx not in reject_ids]
+            extra_train_ids.sort()
+            ids_train.extend(extra_train_ids)
+
+        if args.flickr_dataset:
+            flickr_train_ids = [os.path.join(FLICKR_TRAIN_FOLDER,line.rstrip('\n')) \
+                for line in open(os.path.join(FLICKR_TRAIN_FOLDER, 'good_jpgs'))]
+            bad_jpgs         = [os.path.join(FLICKR_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+                for line in open(os.path.join(FLICKR_TRAIN_FOLDER, 'bad_jpgs'))]
+            offending_jpgs   = [os.path.join(FLICKR_TRAIN_FOLDER,line.rstrip('\n').split(' ')[0]) \
+                for line in open(os.path.join(FLICKR_TRAIN_FOLDER, 'offending_jpgs'))]
+            reject_ids = bad_jpgs + offending_jpgs
+            flickr_train_ids = [idx for idx in flickr_train_ids if idx not in reject_ids]
+            flickr_train_ids.sort()
+            ids_train.extend(flickr_train_ids)
+
         random.shuffle(ids_train)
 
         extra_val_ids = glob.glob(join(EXTRA_VAL_FOLDER,'*/*.jpg'))
         extra_val_ids.sort()
         ids_val.extend(extra_val_ids)
 
-        classes_val = [get_class(idx.split('/')[-2]) for idx in ids_val]
-        classes_val_count = np.bincount(classes_val)
-        max_classes_val_count = max(max(classes_val_count), args.batch_size//2)
+        classes_val   = [get_class(idx.split('/')[-2]) for idx in ids_val]
+        classes_train = [get_class(idx.split('/')[-2]) for idx in ids_train]
+        classes_val_count   = np.bincount(classes_val)
+        classes_train_count = np.bincount(classes_train)
+        max_classes_val_count = max(max(classes_val_count), int(min(classes_train_count) * .2))
 
         # Balance validation dataset by filling up classes with less items from training set (and removing those from there)
         for class_idx in range(N_CLASSES):
