@@ -94,6 +94,7 @@ parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size
 parser.add_argument('-n5', '--nexus5-hack', action='store_true', help='Attempt to fix nexus 5')
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use orientation flips for augmentation')
+parser.add_argument('-naf', '--non-aggresive-flips', action='store_true', help='Non-aggressive flips for augmentation')
 parser.add_argument('-fcm', '--freeze-classifier', action='store_true', help='Freeze classifier weights (useful to fine-tune FC layers)')
 parser.add_argument('-cas', '--class-aware-sampling', action='store_true', help='Use class aware sampling to balance dataset (instead of class weights)')
 parser.add_argument('-xl', '--experimental-loss', action='store_true', help='Use experimental loss to get flat class probabily distribution on predictions')
@@ -404,10 +405,11 @@ def process_item(item, training, transforms=[[]]):
             if (class_idx == 6) and args.nexus5_hack:
                 canonical_resolution = tuple(RESOLUTIONS[class_idx][0][:2])
                 if img.shape[:2] != canonical_resolution:
-                    img = np.rot90(_img, 1, (0,1))
+                    img = np.rot90(_img, 1 if args.non_aggresive_flips else random.randint(0,3), (0,1))
                     assert img.shape[:2] == canonical_resolution
             else:
-                img = np.rot90(_img, random.randint(0,3), (0,1))
+
+                img = np.rot90(_img, 1 if args.non_aggresive_flips else random.randint(0,3), (0,1))
             # is it rot90(..3..), rot90(..1..) or both? 
             # for phones with landscape mode pics could be taken upside down too, although less likely
             # most of the test images that are flipped are 1
@@ -787,6 +789,7 @@ else:
         ('_xx' if args.flickr_dataset else '') + \
         ('_cc{}'.format(','.join([str(c) for c in args.center_crops])) if args.center_crops else '') + \
         ('_nf' if args.no_flips else '') + \
+        ('_naf' if args.non_aggresive_flips else '') + \
         ('_cas' if args.class_aware_sampling else '') + \
         ('_mu' if args.mix_up else '') + \
         ('_n5' if args.nexus5_hack else '') 
@@ -1025,7 +1028,7 @@ else:
                 manipulated = np.copy(original_manipulated)
 
                 if 'orientation' in transform:
-                    img = np.rot90(img, 3, (0,1))
+                    img = np.rot90(img, 1 if args.non_aggresive_flips else random.randint(0,3), (0,1))
                 if 'manipulation' in transform and not original_manipulated:
                     img, manipulation_idx = get_random_manipulation(img)
                     manipulated = np.float32([1.])
