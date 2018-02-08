@@ -109,7 +109,9 @@ parser.add_argument('-t', '--test', action='store_true', help='Test model and ge
 parser.add_argument('-tt', '--test-train', action='store_true', help='Test model on the training set')
 parser.add_argument('-tcs', '--test-crop-supersampling', default=1, type=int, help='Factor of extra crops to sample during test, especially useful when crop size is less than 512, e.g. -tcs 4')
 parser.add_argument('-tta', action='store_true', help='Enable test time augmentation')
-parser.add_argument('-e', '--ensembling', type=str, default='arithmetic', help='Type of ensembling: arithmetic|geometric for TTA')
+parser.add_argument('-e', '--ensembling', type=str, default='arithmetic', help='Type of ensembling: arithmetic|geometric|argmax for TTA')
+parser.add_argument('-em', '--ensemble-models', nargs='*', type=str, default=None, help='Type of ensembling: arithmetic|geometric|argmax for TTA')
+parser.add_argument('-th', '--threshold', default=0.5, type=float, help='Ignore soft probabilities less than threshold, e.g. -th 0.6')
 
 args = parser.parse_args()
 
@@ -686,7 +688,7 @@ if args.model:
     predictions_name = model.outputs[0].name
     preffix_index = predictions_name.find('_')
     preffix = predictions_name[:preffix_index+1] if preffix_index != -1 else ''
-else:
+elif not args.ensemble_models:
     if args.learning_rate is None:
         args.learning_rate = 1e-4   # default LR unless told otherwise
 
@@ -815,10 +817,42 @@ def print_distribution(ids, classes=None, prediction_probabilities=None):
         print("                                Total poor predictions: {:04.1f}% (threshold = {:03.1f})".format( \
             100. * poor_prediction_probabilities / classes.size, threshold))
 
-model.summary()
-model = multi_gpu_model(model, gpus=args.gpus)
+def save_csv_and_npy(ids, prediction_probabilities, classes, filename_preffix, save_npy=True):
+    prediction_probabilities = np.squeeze(np.array(prediction_probabilities))
+    print("Test set predictions distribution:")
+    print_distribution(None, classes=classes, prediction_probabilities=prediction_probabilities)
+    print("Predictions as per old-school model inference:")
+    print("kg submit {}".format(filename_preffix + '.csv'))
 
-if not (args.test or args.test_train):
+    if save_npy:
+        np.save(filename_preffix + '.npy', prediction_probabilities)
+
+    items_per_class = len(prediction_probabilities) // N_CLASSES # it works b/c test dataset length is divisible by N_CLASSES
+    csv_name  = filename_preffix + '_by_probability.csv'
+    poor_predictions = 0
+    with open(csv_name, 'w') as csvfile:
+        csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
+        csv_writer.writerow(['fname','camera'])
+        sum_prediction_probabilities_by_class = np.sum(prediction_probabilities, axis=(0,))
+        for class_idx in np.argsort(sum_prediction_probabilities_by_class)[::-1]:
+            largest_idx = np.argpartition(prediction_probabilities[:,class_idx], -items_per_class)[-items_per_class:]
+            prediction_probabilities_sum = np.sum(prediction_probabilities[largest_idx], axis=1)
+            prediction_probabilities_sum_zeros = prediction_probabilities_sum.size - np.count_nonzero(prediction_probabilities_sum)
+            poor_predictions += np.sum((prediction_probabilities_sum > 1.) | (prediction_probabilities_sum < 0.7))
+            prediction_probabilities[largest_idx] = -np.inf
+            ids_by_class = [ids[largest_id] for largest_id in largest_idx]
+            for largest_id in ids_by_class:
+                csv_writer.writerow([largest_id.split('/')[-1], CLASSES[class_idx]])
+    print("Poor predictions: {}".format(poor_predictions) )
+    print("Predictions assuming prior flat probability distribution on test dataset:")
+    print("kg submit {}".format(csv_name))
+    csvfile.close()
+
+if not args.ensemble_models:
+    model.summary()
+    model = multi_gpu_model(model, gpus=args.gpus)
+
+if not (args.test or args.test_train or args.ensemble_models):
 
     # TRAINING
     ids = glob.glob(join(TRAIN_FOLDER,'*/*.jpg'))
@@ -967,7 +1001,7 @@ if not (args.test or args.test_train):
             class_weight={ preffix + 'predictions': class_weight, preffix + 'manipulations' : [1.] * N_MANIPULATIONS } \
                 if not args.class_aware_sampling else None)
 
-else:
+elif args.test or args.test_train:
     # TEST
     if args.test:
         ids = glob.glob(join(TEST_FOLDER,'*.tif'))
@@ -1132,25 +1166,52 @@ else:
             print("Accuracy: " + str(correct_predictions / (len(transforms) * i)))
 
         if args.test:
-            prediction_probabilities = np.squeeze(np.array(prediction_probabilities))
-            print("Test set predictions distribution:")
-            print_distribution(None, classes=classes, prediction_probabilities=prediction_probabilities)
-            print("Predictions as per old-school model inference:")
-            print("kg submit {}".format(csv_name))
+            save_csv_and_npy(ids, prediction_probabilities, classes, csv_name[:-4])
 
-            items_per_class = len(prediction_probabilities) // N_CLASSES # it works b/c test dataset length is divisible by N_CLASSES
+elif args.ensemble_models:
+    # will build array (len(args.ensemble_models), 2640, 10)
+    TEST_ITEMS = 2640
+    predictions = np.zeros((len(args.ensemble_models), TEST_ITEMS, len(CLASSES)))
+    filename_preffix = os.path.join(CSV_FOLDER, 'ensemble_' + str(len(args.ensemble_models)) + '_' + args.ensembling + '_th' + str(args.threshold) )
+    for it, predictions_path in enumerate(args.ensemble_models):
+        preds_single_model = np.load(predictions_path) 
+        classes_single_model = np.squeeze(np.argmax(preds_single_model, axis=1))
+        print("Test set predictions distribution for model: " + predictions_path)
+        print_distribution(None, classes=classes_single_model, prediction_probabilities=preds_single_model)
+        print()
+        assert preds_single_model.shape[:2] == (TEST_ITEMS,len(CLASSES))
+        predictions[it,...] = preds_single_model
+        # e.g. DenseNet201_do0.3_doc0.0_avg-epoch128-val_acc0.964744.hdf5
+        print(predictions_path)
+        match = re.search(r'(([a-zA-Z\d]+)_cs[,A-Za-z_\d\.]+)-epoch(\d+)-val_acc([0-9\.]+).*\.npy', predictions_path)
+        filename_preffix += '_' + match.group(4)
+    
+    ids = glob.glob(join(TEST_FOLDER,'*.tif'))
+    ids.sort()
+    
+    print("Filename preffix: " + filename_preffix)
+    predictions[predictions < args.threshold] = np.nan
 
-            csv_name  = os.path.join(CSV_FOLDER,'submission_' + model_name + '_by_probability.csv')
-            with open(csv_name, 'w') as csvfile:
-                csv_writer = csv.writer(csvfile, delimiter=',',quotechar='|', quoting=csv.QUOTE_MINIMAL)
-                csv_writer.writerow(['fname','camera'])
-                sum_prediction_probabilities_by_class = np.sum(prediction_probabilities, axis=(0,))
-                for class_idx in np.argsort(sum_prediction_probabilities_by_class)[::-1]:
-                    largest_idx = np.argpartition(prediction_probabilities[:,class_idx], -items_per_class)[-items_per_class:]
-                    prediction_probabilities[largest_idx] = 0.
-                    ids_by_class = [ids[largest_id] for largest_id in largest_idx]
-                    for largest_id in ids_by_class:
-                        csv_writer.writerow([largest_id.split('/')[-1], CLASSES[class_idx]])
-            print("Predictions assuming prior flat probability distribution on test dataset:")
-            print("kg submit {}".format(csv_name))
-            csvfile.close()
+    if args.ensembling == 'geometric':
+        predictions = np.log(predictions + K.epsilon()) # avoid numerical instability log(0)
+        predictions = np.nanmean(predictions, axis=0, keepdims=True)
+        predictions = np.exp(predictions) - K.epsilon() # get soft-probs again so we can see poor predictions
+    elif args.ensembling == 'argmax':
+        predictions = predictions[np.unravel_index(np.argmax(predictions), predictions.shape)[:-1]]
+        predictions = np.expand_dims(predictions, axis=0)
+    elif args.ensembling == 'arithmetic':
+        predictions = np.nanmean(predictions, axis=0, keepdims=True)
+    else:
+        Print("Unknown ensembling type")
+        assert False
+
+    predictions = np.nan_to_num(predictions)
+
+    classes = np.squeeze(np.nanargmax(predictions, axis=2))
+
+
+    save_csv_and_npy(ids, predictions, classes, filename_preffix, save_npy=False)
+
+
+
+
