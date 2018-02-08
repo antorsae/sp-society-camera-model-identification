@@ -91,7 +91,6 @@ parser.add_argument('-rp', '--reduce-pooling', type=int, default=None, help='If 
 
 # training regime
 parser.add_argument('-cs', '--crop-size', type=int, default=512, help='Crop size')
-parser.add_argument('-n5', '--nexus5-hack', action='store_true', help='Attempt to fix nexus 5')
 parser.add_argument('-cc', '--center-crops', nargs='*', type=int, default=[], help='Train on center crops only (not random crops) for the selected classes e.g. -cc 1 6 or all -cc -1')
 parser.add_argument('-nf', '--no-flips', action='store_true', help='Dont use orientation flips for augmentation')
 parser.add_argument('-naf', '--non-aggressive-flips', action='store_true', help='Non-aggressive flips for augmentation')
@@ -406,15 +405,7 @@ def process_item(item, training, transforms=[[]]):
         # some images are landscape, others are portrait, so augment training by randomly changing orientation
         if not args.no_flips and ((((np.random.rand() < 0.5) and training and ORIENTATION_FLIP_ALLOWED[class_idx])) or force_orientation):
 
-            # TESTING: do not flip Nexus 5
-            if (class_idx == 6) and args.nexus5_hack:
-                canonical_resolution = tuple(RESOLUTIONS[class_idx][0][:2])
-                if img.shape[:2] != canonical_resolution:
-                    img = np.rot90(_img, random.choice([1,3] if args.non_aggressive_flips else [1,2,3]), (0,1))
-                    assert img.shape[:2] == canonical_resolution
-            else:
-
-                img = np.rot90(_img, random.choice([1,3] if args.non_aggressive_flips else [1,2,3]), (0,1))
+            img = np.rot90(_img, random.choice([1,3] if args.non_aggressive_flips else [1,2,3]), (0,1))
             # is it rot90(..3..), rot90(..1..) or both? 
             # for phones with landscape mode pics could be taken upside down too, although less likely
             # most of the test images that are flipped are 1
@@ -796,9 +787,7 @@ else:
         ('_nf' if args.no_flips else '') + \
         ('_naf' if args.non_aggressive_flips else '') + \
         ('_cas' if args.class_aware_sampling else '') + \
-        ('_mu' if args.mix_up else '') + \
-        ('_n5' if args.nexus5_hack else '') 
-
+        ('_mu' if args.mix_up else '') 
 
     print("Model name: " + model_name)
 
