@@ -939,7 +939,7 @@ if not (args.test or args.test_train):
             monitor=monitor,
             verbose=0,  save_best_only=True, save_weights_only=False, mode='max', period=1)
 
-    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.5, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
+    reduce_lr = ReduceLROnPlateau(monitor=monitor, factor=0.2, patience=5, min_lr=1e-9, epsilon = 0.00001, verbose=1, mode='max')
 
     orientation_flip_augmentation_factor = (sum(ORIENTATION_FLIP_ALLOWED) / len(ORIENTATION_FLIP_ALLOWED)) if not args.no_flips else 0.5
     
