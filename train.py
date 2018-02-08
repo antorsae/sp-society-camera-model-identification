@@ -1003,29 +1003,67 @@ else:
             original_manipulated = np.float32([1. if idx.find('manip') != -1 else 0.])
 
             if args.test and args.tta:
-                transforms = [[], ['orientation']]
+                transforms_list = [[], 
+                    ['orientation_1'],
+                    ['orientation_3'],
+                    ['manipulation_jpg70'],
+                    ['manipulation_jpg90'],
+                    ['manipulation_gamma0.8'],
+                    ['manipulation_gamma1.2'],
+                    ['manipulation_bicubic1.5'],
+                    ['manipulation_bicubic2.0'],
+                    ['orientation_1', 'manipulation_jpg70'],
+                    ['orientation_1', 'manipulation_jpg90'],
+                    ['orientation_1', 'manipulation_gamma0.8'],
+                    ['orientation_1', 'manipulation_gamma1.2'],
+                    ['orientation_1', 'manipulation_bicubic1.5'],
+                    ['orientation_1', 'manipulation_bicubic2.0'],
+                    ['orientation_3', 'manipulation_jpg70'],
+                    ['orientation_3', 'manipulation_jpg90'],
+                    ['orientation_3', 'manipulation_gamma0.8'],
+                    ['orientation_3', 'manipulation_gamma1.2'],
+                    ['orientation_3', 'manipulation_bicubic1.5'],
+                    ['orientation_3', 'manipulation_bicubic2.0'],
+                    ]
             elif args.test_train:
-                transforms = [[], ['orientation'], ['manipulation'], ['manipulation', 'orientation']]
+                transforms_list = [[], ['orientation'], ['manipulation'], ['manipulation', 'orientation']]
             else:
-                transforms = [[]]
+                transforms_list = [[]]
 
             ssx = int(img.shape[1] / CROP_SIZE * args.test_crop_supersampling)
             ssy = int(img.shape[0] / CROP_SIZE * args.test_crop_supersampling)
 
-            img_batch         = np.zeros((len(transforms)* ssx * ssy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
-            manipulated_batch = np.zeros((len(transforms)* ssx * ssy, 1),  dtype=np.float32)
-            center_crop_batch = np.zeros((len(transforms)* ssx * ssy, 2),  dtype=np.float32)
+            img_batch         = np.zeros((len(transforms_list)* ssx * ssy, CROP_SIZE, CROP_SIZE, 3), dtype=np.float32)
+            manipulated_batch = np.zeros((len(transforms_list)* ssx * ssy, 1),  dtype=np.float32)
+            center_crop_batch = np.zeros((len(transforms_list)* ssx * ssy, 2),  dtype=np.float32)
 
-            i = 0
-            for transform in transforms:
+            batch_idx = 0
+            for transforms in transforms_list:
                 img = np.copy(original_img)
                 manipulated = np.copy(original_manipulated)
 
-                if 'orientation' in transform:
-                    img = np.rot90(img, random.choice([1,3] if args.non_aggressive_flips else [1,2,3]), (0,1))
-                if 'manipulation' in transform and not original_manipulated:
-                    img, manipulation_idx = get_random_manipulation(img)
-                    manipulated = np.float32([1.])
+                orientation_transform  = [m for m in transforms if m.startswith('orientation')]
+                manipulation_transform = [m for m in transforms if m.startswith('manipulation')]
+                if orientation_transform:
+                    assert len(orientation_transform) == 1
+                    rot_times = orientation_transform[0][12:]
+                    rotations = int(rot_times) if rot_times != '' else random.choice([1,3] if args.non_aggressive_flips else [1,2,3])
+                    img = np.rot90(img, rotations, (0,1))
+                if manipulation_transform:
+                    assert len(manipulation_transform) == 1
+                    if original_manipulated:
+                        continue
+                    else:
+                        manipulation = manipulation_transform[0][13:]
+                        if manipulation == '':
+                            manipulation = random_choice('jpg70', 'jpg90', 'gamma0.8', 'gamma1.2', 'bicubic1.5', 'bicubic2.0')
+                            # cannot do  'bicubic0.5', 'bicubic0.8' b/c resulting image is too small
+
+                        img, manipulation_idx = get_random_manipulation(img, manipulation=manipulation)
+                        if manipulation.startswith('bicubic'):
+                            img, _ = get_crop(img, 512, random_crop=False)
+
+                        manipulated = np.float32([1.])
 
                 if args.test_train:
                     img, _ = get_crop(img, 512, random_crop=False)
@@ -1036,11 +1074,12 @@ else:
                 for x in np.linspace(0, img.shape[1] - CROP_SIZE, args.test_crop_supersampling * sx, dtype=np.int64):
                     for y in np.linspace(0, img.shape[0] - CROP_SIZE, args.test_crop_supersampling * sy, dtype=np.int64):
                         _img = np.copy(img[y:y+CROP_SIZE, x:x+CROP_SIZE])
-                        img_batch[i]           = preprocess_image(_img)
-                        manipulated_batch[i] = manipulated
-                        i += 1
+                        img_batch[batch_idx]         = preprocess_image(_img)
+                        manipulated_batch[batch_idx] = manipulated
+                        batch_idx += 1
+                        # TODO: For crop size < 512 make a decent approximation of center_crop_batch
 
-            prediction, _ = model.predict_on_batch([img_batch,manipulated_batch, center_crop_batch])
+            prediction, _ = model.predict_on_batch([img_batch[:batch_idx],manipulated_batch[:batch_idx], center_crop_batch[:batch_idx]])
             if prediction.shape[0] != 1: # TTA
                 if args.ensembling == 'geometric':
                     predictions = np.log(prediction + K.epsilon()) # avoid numerical instability log(0)
