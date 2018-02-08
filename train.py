@@ -978,8 +978,38 @@ else:
 
     ids.sort()
 
+    TTA_TRANSFORMS = [[], 
+                    ['orientation_1'],
+                    ['orientation_2'],
+                    ['orientation_3'],
+                    ['manipulation_jpg70'],
+                    ['manipulation_jpg90'],
+                    ['manipulation_gamma0.8'],
+                    ['manipulation_gamma1.2'],
+                    ['manipulation_bicubic1.5'],
+                    ['manipulation_bicubic2.0'],
+                    ['orientation_1', 'manipulation_jpg70'],
+                    ['orientation_1', 'manipulation_jpg90'],
+                    ['orientation_1', 'manipulation_gamma0.8'],
+                    ['orientation_1', 'manipulation_gamma1.2'],
+                    ['orientation_1', 'manipulation_bicubic1.5'],
+                    ['orientation_1', 'manipulation_bicubic2.0'],
+                    ['orientation_2', 'manipulation_jpg70'],
+                    ['orientation_2', 'manipulation_jpg90'],
+                    ['orientation_2', 'manipulation_gamma0.8'],
+                    ['orientation_2', 'manipulation_gamma1.2'],
+                    ['orientation_2', 'manipulation_bicubic1.5'],
+                    ['orientation_2', 'manipulation_bicubic2.0'],
+                    ['orientation_3', 'manipulation_jpg70'],
+                    ['orientation_3', 'manipulation_jpg90'],
+                    ['orientation_3', 'manipulation_gamma0.8'],
+                    ['orientation_3', 'manipulation_gamma1.2'],
+                    ['orientation_3', 'manipulation_bicubic1.5'],
+                    ['orientation_3', 'manipulation_bicubic2.0'],
+                    ]
+#    '''
     match = re.search(r'([^/]*)\.hdf5', args.model)
-    model_name = match.group(1) + ('_tta_' + args.ensembling if args.tta else '')
+    model_name = match.group(1) + ('_tta' + str(len(TTA_TRANSFORMS)) + '_' + args.ensembling if args.tta else '')
     csv_name   = os.path.join(CSV_FOLDER, 'submission_' + model_name + '.csv')
     with conditional(args.test, open(csv_name, 'w')) as csvfile:
 
@@ -1003,28 +1033,7 @@ else:
             original_manipulated = np.float32([1. if idx.find('manip') != -1 else 0.])
 
             if args.test and args.tta:
-                transforms_list = [[], 
-                    ['orientation_1'],
-                    ['orientation_3'],
-                    ['manipulation_jpg70'],
-                    ['manipulation_jpg90'],
-                    ['manipulation_gamma0.8'],
-                    ['manipulation_gamma1.2'],
-                    ['manipulation_bicubic1.5'],
-                    ['manipulation_bicubic2.0'],
-                    ['orientation_1', 'manipulation_jpg70'],
-                    ['orientation_1', 'manipulation_jpg90'],
-                    ['orientation_1', 'manipulation_gamma0.8'],
-                    ['orientation_1', 'manipulation_gamma1.2'],
-                    ['orientation_1', 'manipulation_bicubic1.5'],
-                    ['orientation_1', 'manipulation_bicubic2.0'],
-                    ['orientation_3', 'manipulation_jpg70'],
-                    ['orientation_3', 'manipulation_jpg90'],
-                    ['orientation_3', 'manipulation_gamma0.8'],
-                    ['orientation_3', 'manipulation_gamma1.2'],
-                    ['orientation_3', 'manipulation_bicubic1.5'],
-                    ['orientation_3', 'manipulation_bicubic2.0'],
-                    ]
+                transforms_list = TTA_TRANSFORMS
             elif args.test_train:
                 transforms_list = [[], ['orientation'], ['manipulation'], ['manipulation', 'orientation']]
             else:
@@ -1096,10 +1105,16 @@ else:
             if prediction.shape[0] != 1: # TTA
                 if args.ensembling == 'geometric':
                     prediction = np.log(prediction + K.epsilon()) # avoid numerical instability log(0)
-                    prediction = np.mean(prediction, axis=0)
+                    prediction = np.mean(prediction, axis=0, keepdims=True)
                     prediction = np.exp(prediction) - K.epsilon() # get soft-probs again so we can see poor predictions
+                elif args.ensembling == 'argmax':
+                    prediction = prediction[np.unravel_index(np.argmax(prediction), prediction.shape)[:-1]]
+                    prediction = np.expand_dims(prediction, axis=0)
+                elif args.ensembling == 'arithmetic':
+                    prediction = np.mean(prediction, axis=0, keepdims=True)
                 else:
-                    prediction = np.mean(prediction, axis=0)
+                    Print("Unknown ensembling type")
+                    assert False
 
             prediction_class_idx = np.argmax(prediction)
 
