@@ -1079,11 +1079,27 @@ else:
                         batch_idx += 1
                         # TODO: For crop size < 512 make a decent approximation of center_crop_batch
 
-            prediction, _ = model.predict_on_batch([img_batch[:batch_idx],manipulated_batch[:batch_idx], center_crop_batch[:batch_idx]])
+            if len(model.inputs)== 1:
+                _inputs = img_batch[:batch_idx]
+            elif len(model.inputs) == 2:
+                _inputs = [img_batch[:batch_idx],manipulated_batch[:batch_idx]]
+            else:
+                _inputs = [img_batch[:batch_idx],manipulated_batch[:batch_idx], center_crop_batch[:batch_idx]]
+
+            _output = model.predict_on_batch(_inputs)
+
+            if len(model.outputs) == 1:
+                prediction = _output
+            else:
+                prediction = _output[0]
+
             if prediction.shape[0] != 1: # TTA
                 if args.ensembling == 'geometric':
-                    predictions = np.log(prediction + K.epsilon()) # avoid numerical instability log(0)
-                prediction = np.mean(prediction, axis=0)
+                    prediction = np.log(prediction + K.epsilon()) # avoid numerical instability log(0)
+                    prediction = np.mean(prediction, axis=0)
+                    prediction = np.exp(prediction) - K.epsilon() # get soft-probs again so we can see poor predictions
+                else:
+                    prediction = np.mean(prediction, axis=0)
 
             prediction_class_idx = np.argmax(prediction)
 
